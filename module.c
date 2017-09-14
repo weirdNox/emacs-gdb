@@ -7,7 +7,7 @@
 #define InvalidCodePath assert(0)
 #define InvalidDefaultCase default: { InvalidCodePath(); } break
 #define IgnoreCase(x) case (x): break
-#define IgnoredDefaultCase default: break
+#define IgnoreDefaultCase default: break
 
 typedef uint8_t  u8;
 typedef uint16_t u16;
@@ -25,6 +25,7 @@ int plugin_is_GPL_compatible;
 
 internal struct gdbwire_mi_parser *GdbMiParser;
 internal struct gdbwire_mi_output *ParserOutput;
+internal bool IgnorePrompt;
 
 typedef struct
 {
@@ -91,9 +92,31 @@ GdbWireCallback(void *Context, struct gdbwire_mi_output *Output)
     *WriteTo = Output;
 }
 
+internal char *
+GdbWireGetResultString(struct gdbwire_mi_result *Result, char *Variable)
+{
+    char *ToReturn = 0;
+    if(Variable)
+    {
+        for(;
+            Result;
+            Result = Result->next)
+        {
+            if(Result->variable && Result->kind == GDBWIRE_MI_CSTRING &&
+               strcmp(Variable, Result->variable) == 0)
+            {
+                ToReturn = Result->variant.cstring;
+                break;
+            }
+        }
+    }
+
+    return ToReturn;
+}
+
 internal void
 HandleMiOobRecord(emacs_env *Environment, struct gdbwire_mi_oob_record *Record,
-                  string_builder *PrintString, u8 Debug)
+                  string_builder *PrintString)
 {
     switch(Record->kind)
     {
@@ -108,13 +131,15 @@ HandleMiOobRecord(emacs_env *Environment, struct gdbwire_mi_oob_record *Record,
                     {
                         case GDBWIRE_MI_ASYNC_STOPPED:
                         {
+                            // NOTE(nox): *stopped does not end with a prompt...
+                            PushString(PrintString, "(gdb) ");
                         } break;
 
                         case GDBWIRE_MI_ASYNC_RUNNING:
                         {
                         } break;
 
-                        IgnoredDefaultCase;
+                        IgnoreDefaultCase;
                     }
                 } break;
 
@@ -122,8 +147,32 @@ HandleMiOobRecord(emacs_env *Environment, struct gdbwire_mi_oob_record *Record,
                 {
                     switch(AsyncRecord->async_class)
                     {
-                        // TODO(nox): Add handlers to some of these notifications
-                        IgnoredDefaultCase;
+                        // TODO(nox): Check if we need more handlers
+                        case GDBWIRE_MI_ASYNC_THREAD_CREATED:
+                        {
+                        } break;
+
+                        case GDBWIRE_MI_ASYNC_THREAD_SELECTED:
+                        {
+                        } break;
+
+                        case GDBWIRE_MI_ASYNC_THREAD_EXITED:
+                        {
+                        } break;
+
+                        case GDBWIRE_MI_ASYNC_BREAKPOINT_CREATED:
+                        {
+                        } break;
+
+                        case GDBWIRE_MI_ASYNC_BREAKPOINT_MODIFIED:
+                        {
+                        } break;
+
+                        case GDBWIRE_MI_ASYNC_BREAKPOINT_DELETED:
+                        {
+                        } break;
+
+                        IgnoreDefaultCase;
                     }
                 } break;
 
@@ -141,50 +190,99 @@ HandleMiOobRecord(emacs_env *Environment, struct gdbwire_mi_oob_record *Record,
                     PushString(PrintString, "%s", StreamRecord->cstring);
                 } break;
 
-                case GDBWIRE_MI_LOG:
-                {
-                    if(Debug)
-                    {
-                        PushString(PrintString, "**GDB LOG** %s", StreamRecord->cstring);
-                    }
-                } break;
-
                 case GDBWIRE_MI_TARGET:
                 {
                     // TODO(nox): If we are outputting to another tty, will we ever receive this?
                     PushString(PrintString, "Target: %s", StreamRecord->cstring);
                 } break;
+
+                IgnoreCase(GDBWIRE_MI_LOG);
             }
         } break;
     }
+}
+
+typedef enum
+{
+    Context_NoContext,
+
+    Context_Ignore,
+    Context_InitialFile,
+
+    Context_Size,
+} token_context;
+
+internal token_context
+GetTokenContext(emacs_env *Environment, char *TokenString)
+{
+    token_context Result = Context_NoContext;
+    if(TokenString)
+    {
+        emacs_value String = Environment->make_string(Environment, TokenString, strlen(TokenString));
+        emacs_value ContextExtractor = Environment->intern(Environment, "gdb--extract-token-context");
+        emacs_value Context = Environment->funcall(Environment, ContextExtractor,
+                                                   1, (emacs_value[]){String});
+        Result = Environment->extract_integer(Environment, Context);
+        assert(Result < Context_Size);
+    }
+    return Result;
 }
 
 internal void
 HandleMiResultRecord(emacs_env *Environment, struct gdbwire_mi_result_record *Record,
                      string_builder *PrintString)
 {
-    // TODO(nox): Handle tokens... I don't know what's their purpose
+    token_context Context = GetTokenContext(Environment, Record->token);
+    struct gdbwire_mi_result *Result = Record->result;
+
     switch(Record->result_class)
     {
         case GDBWIRE_MI_DONE:
         case GDBWIRE_MI_RUNNING:
         case GDBWIRE_MI_CONNECTED:
         {
-            // TODO(nox): Complete this!!
+            switch(Context)
+            {
+                case Context_InitialFile:
+                {
+                    char *File = GdbWireGetResultString(Result, "fullname");
+                    char *Line = GdbWireGetResultString(Result, "line");
+                    if(File)
+                    {
+                        int NumArguments = 1;
+                        emacs_value Arguments[2];
+                        Arguments[0] = Environment->make_string(Environment, File, strlen(File));
+                        if(Line)
+                        {
+                            ++NumArguments;
+                            Arguments[1] = Environment->make_string(Environment, Line, strlen(Line));
+                        }
+                        emacs_value InitialFileFunc = Environment->intern(Environment,
+                                                                          "gdb--set-initial-file");
+                        Environment->funcall(Environment, InitialFileFunc, NumArguments, Arguments);
+                    }
+                } break;
+
+                IgnoreDefaultCase;
+            }
         } break;
 
         case GDBWIRE_MI_ERROR:
         {
-            struct gdbwire_mi_result *Result = Record->result;
-            while(Result)
+            // TODO(nox): Docs say we should update every GUI information
+            switch(Context)
             {
-                if(Result && strcmp(Result->variable, "msg") == 0 &&
-                   Result->kind == GDBWIRE_MI_CSTRING)
+                IgnoreCase(Context_Ignore);
+                IgnoreCase(Context_InitialFile);
+
+                default:
                 {
-                    PushString(PrintString, "%s\n", Result->variant.cstring);
-                    break;
-                }
-                Result = Result->next;
+                    char *Message = GdbWireGetResultString(Result, "msg");
+                    if(Message)
+                    {
+                        PushString(PrintString, "%s\n", Result->variant.cstring);
+                    }
+                } break;
             }
         } break;
 
@@ -198,30 +296,30 @@ HandleMiResultRecord(emacs_env *Environment, struct gdbwire_mi_result_record *Re
             PushString(PrintString, "Error while parsing, GdbWire couldn't figure out class of result record!");
         } break;
     }
+
+    if(Context != Context_NoContext)
+    {
+        IgnorePrompt = true;
+    }
 }
 
 // NOTE(weirdNox): Because this is an internal helper function, we will assume that
 // everything passed in is valid.
-#define PARSE_GDB_MI_OUTPUT_NAME "gdb--parse-mi-output"
-#define PARSE_GDB_MI_OUTPUT_DOC "(" PARSE_GDB_MI_OUTPUT_NAME " string)" \
-    "\nParse GDB/MI output."
+#define PARSE_GDB_MI_OUTPUT_NAME "gdb--handle-mi-output"
+#define PARSE_GDB_MI_OUTPUT_DOC "(" PARSE_GDB_MI_OUTPUT_NAME " output)" \
+    "\nHandle GDB/MI output and return string to print."
 internal emacs_value
-ParseGdbMiOutput(emacs_env *Environment, ptrdiff_t NumberOfArguments,
-                 emacs_value Arguments[], void *Closure)
+HandleGdbMiOutput(emacs_env *Environment, ptrdiff_t NumberOfArguments,
+                  emacs_value Arguments[], void *Closure)
 {
-    emacs_value SymbolValue = Environment->intern(Environment, "symbol-value");
-    u8 Debug = Environment->is_not_nil(Environment,
-                                       Environment->funcall(Environment, SymbolValue, 1,
-                                                            (emacs_value[]){Environment->intern(Environment, "gdb-debug-output")}));
-
     ptrdiff_t Size;
     Environment->copy_string_contents(Environment, Arguments[0], 0, &Size);
-    char *String = malloc(Size);
-    Environment->copy_string_contents(Environment, Arguments[0], String, &Size);
+    char *OutputString = malloc(Size);
+    Environment->copy_string_contents(Environment, Arguments[0], OutputString, &Size);
+
+    gdbwire_mi_parser_push(GdbMiParser, OutputString);
 
     string_builder PrintString = AllocateString();
-
-    gdbwire_mi_parser_push(GdbMiParser, String);
     for(struct gdbwire_mi_output *Output = ParserOutput;
         Output;
         Output = Output->next)
@@ -230,7 +328,7 @@ ParseGdbMiOutput(emacs_env *Environment, ptrdiff_t NumberOfArguments,
         {
             case GDBWIRE_MI_OUTPUT_OOB:
             {
-                HandleMiOobRecord(Environment, Output->variant.oob_record, &PrintString, Debug);
+                HandleMiOobRecord(Environment, Output->variant.oob_record, &PrintString);
             } break;
 
             case GDBWIRE_MI_OUTPUT_RESULT:
@@ -238,15 +336,19 @@ ParseGdbMiOutput(emacs_env *Environment, ptrdiff_t NumberOfArguments,
                 HandleMiResultRecord(Environment, Output->variant.result_record, &PrintString);
             } break;
 
-            case GDBWIRE_MI_OUTPUT_PROMPT:
-            {
-                PushString(&PrintString, "(gdb) ");
-            } break;
-
             case GDBWIRE_MI_OUTPUT_PARSE_ERROR:
             {
                 PushString(&PrintString, "An error occurred on token %s\n",
                            Output->variant.error.token);
+            } break;
+
+            case GDBWIRE_MI_OUTPUT_PROMPT:
+            {
+                if(!IgnorePrompt)
+                {
+                    PushString(&PrintString, "(gdb) ");
+                }
+                IgnorePrompt = false;
             } break;
         }
     }
@@ -267,7 +369,7 @@ int emacs_module_init(struct emacs_runtime *EmacsRuntime)
     emacs_value FSet = Environment->intern(Environment, "fset");
     emacs_value Arguments[2];
     Arguments[0] = Environment->intern(Environment, PARSE_GDB_MI_OUTPUT_NAME);
-    Arguments[1] = Environment->make_function(Environment, 1, 1, ParseGdbMiOutput,
+    Arguments[1] = Environment->make_function(Environment, 1, 1, HandleGdbMiOutput,
                                               PARSE_GDB_MI_OUTPUT_DOC, 0);
     Environment->funcall(Environment, FSet, 2, Arguments);
 
