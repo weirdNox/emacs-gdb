@@ -24,9 +24,10 @@
 ;; This will be a replacement for GDB mode.
 
 ;;; Code:
-(require 'comint)
 (add-to-list 'load-path (expand-file-name "."))
 (require 'emacs-gdb-module)
+(require 'comint)
+(require 'cl-lib)
 
 (defvar gdb-debug nil
   "If non `nil', print raw GDB/MI output and accept any
@@ -64,6 +65,9 @@ and CONTEXT must be a member of `gdb--available-token-contexts'.")
   "List of implemented token contexts.
 Must be in the same order of the `token_context' enum in the
 dynamic module.")
+
+(defvar-local gdb--breakpoints-list nil
+  "Alist of breakpoints")
 
 (defvar-local gdb--buffer-type nil
   "Type of current GDB buffer.")
@@ -136,10 +140,45 @@ Possible values are:
     (gdb--command "-gdb-set non-stop on" 'gdb--context-ignore)
     (gdb--command "-file-list-exec-source-file" 'gdb--context-initial-file)))
 
+(defun gdb--comint-sender (process string)
+  "Send user commands from comint."
+  (if gdb-debug
+      (comint-simple-send process string)
+    (comint-simple-send process (concat "-interpreter-exec console "
+                                        (gdb--escape-argument string)))))
+
+(defun gdb--output-filter (string)
+  "Parse GDB/MI output."
+  (let ((output (gdb--handle-mi-output string)))
+    (if gdb-debug
+        string
+      output)))
+
 (defun gdb--comint-sentinel (process str)
   (when (or (not (buffer-name (process-buffer process)))
             (eq (process-status process) 'exit))
     (gdb-kill)))
+
+(defun gdb--get-comint-process ()
+  (and gdb--comint-buffer (buffer-live-p gdb--comint-buffer) (get-buffer-process gdb--comint-buffer)))
+
+(defmacro gdb--local (&rest body)
+  "Execute body inside GDB comint buffer."
+  `(when (buffer-live-p gdb--comint-buffer)
+     (with-current-buffer gdb--comint-buffer
+       ,@body)))
+
+(defun gdb--command (string &optional token-context)
+  (let* ((process (gdb--get-comint-process))
+         (token (gdb--local gdb--next-token))
+         (token-string (int-to-string token)))
+    (when process
+      (when (member token-context gdb--available-token-contexts)
+        (setq string (concat token-string  string))
+        (gdb--local
+         (push `(,token-string . ,token-context) gdb--token-contexts)
+         (setq gdb--next-token (1+ gdb--next-token))))
+      (comint-simple-send process string))))
 
 ;; NOTE(nox): Inferior I/O buffer
 (defun gdb--inferior-io-init ()
@@ -221,36 +260,13 @@ BUFFER-TYPE must be a member of `gdb--buffer-types'."
           (setq gdb--thread-number thread)))
       buffer)))
 
-(defmacro gdb--local (&rest body)
-  "Execute body inside GDB comint buffer."
-  `(when (buffer-live-p gdb--comint-buffer)
-     (with-current-buffer gdb--comint-buffer
-       ,@body)))
-
 (defun gdb--rename-buffer (&optional extra)
   (rename-buffer (concat "*GDB"
                          (when (and extra (not (string= "" extra))) (concat " - " extra))
                          "*")
                  t))
 
-(defun gdb--escape-argument (string)    ; From gdb-mi.el
-  "Return STRING quoted properly as an MI argument.
-The string is enclosed in double quotes.
-All embedded quotes, newlines, and backslashes are preceded with a backslash."
-  (setq string (replace-regexp-in-string "\\([\"\\]\\)" "\\\\\\&" string))
-  (setq string (replace-regexp-in-string "\n" "\\n" string t t))
-  (concat "\"" string "\""))
-
-(defun gdb--comint-sender (process string)
-  "Send user commands from comint."
-  (if gdb-debug
-      (comint-simple-send process string)
-    (comint-simple-send process (concat "-interpreter-exec console "
-                                        (gdb--escape-argument string)))))
-
-(defun gdb--get-comint-process ()
-  (and gdb--comint-buffer (buffer-live-p gdb--comint-buffer) (get-buffer-process gdb--comint-buffer)))
-
+;; NOTE(nox): Functions to be called by the dynamic module
 (defun gdb--extract-token-context (token-string)
   (let* ((context (assoc token-string (gdb--local gdb--token-contexts)))
          (result 1))
@@ -263,24 +279,77 @@ All embedded quotes, newlines, and backslashes are preceded with a backslash."
           (setq result (1+ result)))
         0))))
 
-(defun gdb--command (string &optional token-context)
-  (let* ((process (gdb--get-comint-process))
-         (token (gdb--local gdb--next-token))
-         (token-string (int-to-string token)))
-    (when process
-      (when (member token-context gdb--available-token-contexts)
-        (setq string (concat token-string  string))
-        (gdb--local
-         (push `(,token-string . ,token-context) gdb--token-contexts)
-         (setq gdb--next-token (1+ gdb--next-token))))
-      (comint-simple-send process string))))
+(defun gdb--set-initial-file (file line-string)
+  (gdb--local (setq gdb--selected-file file
+                    gdb--selected-line (string-to-int line-string)))
+  (gdb--display-source-buffer))
 
-(defun gdb--output-filter (string)
-  "Parse GDB/MI output."
-  (let ((output (gdb--handle-mi-output string)))
-    (if gdb-debug
-        string
-      output)))
+(defun gdb--breakpoint-changed (number type disp enabled addr fullname line at pending thread cond
+                                       times)
+  )                                     ; TODO(nox): Finish this!
+
+;; ----------------------------------------------------------------------
+;; NOTE(nox): Everything enclosed in here was adapted from gdb-mi.el
+(defun gdb--escape-argument (string)
+  "Return STRING quoted properly as an MI argument.
+The string is enclosed in double quotes.
+All embedded quotes, newlines, and backslashes are preceded with a backslash."
+  (setq string (replace-regexp-in-string "\\([\"\\]\\)" "\\\\\\&" string))
+  (setq string (replace-regexp-in-string "\n" "\\n" string t t))
+  (concat "\"" string "\""))
+
+(defun gdb--pad-string (string padding)
+  (format (concat "%" (number-to-string padding) "s") string))
+
+(cl-defstruct gdb--table
+  (column-sizes nil)
+  (rows nil)
+  (row-properties nil)
+  (right-align nil))
+
+(defun gdb--table-add-row (table row &optional properties)
+  "Add ROW, a list of strings, to TABLE and recalculate column sizes.
+When non-nil, PROPERTIES will be added to the whole row when
+calling `gdb--table-string'."
+  (let ((rows (gdb--table-rows table))
+        (row-properties (gdb--table-row-properties table))
+        (column-sizes (gdb--table-column-sizes table))
+        (right-align (gdb--table-right-align table)))
+    (when (not column-sizes)
+      (setf (gdb--table-column-sizes table)
+            (make-list (length row) 0)))
+    (setf (gdb--table-rows table)
+          (append rows (list row)))
+    (setf (gdb--table-row-properties table)
+          (append row-properties (list properties)))
+    (setf (gdb--table-column-sizes table)
+          (cl-mapcar (lambda (x s)
+                       (let ((new-x
+                              (max (abs x) (string-width (or s "")))))
+                         (if right-align new-x (- new-x))))
+                     (gdb--table-column-sizes table)
+                     row))
+    ;; Avoid trailing whitespace at eol
+    (if (not (gdb--table-right-align table))
+        (setcar (last (gdb--table-column-sizes table)) 0))))
+
+(defun gdb--table-string (table &optional sep)
+  "Return TABLE as a string with columns separated with SEP."
+  (let ((column-sizes (gdb--table-column-sizes table)))
+    (mapconcat
+     'identity
+     (cl-mapcar
+      (lambda (row properties)
+        (apply 'propertize
+               (mapconcat 'identity
+                          (cl-mapcar (lambda (s x) (gdb--pad-string s x))
+                                     row column-sizes)
+                          sep)
+               properties))
+      (gdb--table-rows table)
+      (gdb--table-row-properties table))
+     "\n")))
+;; ----------------------------------------------------------------------
 
 (defun gdb--find-file (path)
   (let ((full-path (gdb--local (expand-file-name path)))
@@ -301,15 +370,11 @@ All embedded quotes, newlines, and backslashes are preceded with a backslash."
            (goto-char (point-min))
            (forward-line (1- line)))
          (setq window (display-buffer buffer))
-         ;; NOTE(nox): This is needed in order to keep `display-buffer-use-some-window'
-         ;; from resizing it... Maybe should look for an alternative?
          (when window
-           (set-window-parameter window 'quit-restore nil)))))))
-
-(defun gdb--set-initial-file (file &optional line-string)
-  (gdb--local (setq gdb--selected-file file
-                    gdb--selected-line (string-to-int line-string)))
-  (gdb--display-source-buffer))
+           ;; NOTE(nox): This is needed in order to keep `display-buffer-use-some-window'
+           ;; from resizing it... Maybe should look for an alternative?
+           (set-window-parameter window 'quit-restore nil)
+           (with-selected-window window (recenter-top-bottom 0))))))))
 
 (defun gdb--set-window-buffer (window buffer)
   (set-window-dedicated-p window nil)

@@ -4,6 +4,8 @@
 
 #define internal static
 
+#define ArrayCount(x) (sizeof(x) / sizeof(*(x)))
+
 #define InvalidCodePath assert(0)
 #define InvalidDefaultCase default: { InvalidCodePath(); } break
 #define IgnoreCase(x) case (x): break
@@ -21,8 +23,9 @@ typedef int64_t s64;
 
 typedef size_t memory_size;
 
-int plugin_is_GPL_compatible;
+u32 plugin_is_GPL_compatible;
 
+internal emacs_value Nil;
 internal struct gdbwire_mi_parser *GdbMiParser;
 internal struct gdbwire_mi_output *ParserOutput;
 internal bool IgnorePrompt;
@@ -53,7 +56,7 @@ PushString(string_builder *Builder, char *Format, ...)
     {
         va_list VariadicArguments;
         va_start(VariadicArguments, Format);
-        int Length = vsnprintf(0, 0, Format, VariadicArguments);
+        u32 Length = vsnprintf(0, 0, Format, VariadicArguments);
         va_end(VariadicArguments);
         s32 Needed = Builder->Length + Length + 1 - Builder->TotalSize;
         if(Needed > 0)
@@ -96,7 +99,7 @@ internal char *
 GdbWireGetResultString(struct gdbwire_mi_result *Result, char *Variable)
 {
     char *ToReturn = 0;
-    if(Variable)
+    if(Result && Variable)
     {
         for(;
             Result;
@@ -115,6 +118,78 @@ GdbWireGetResultString(struct gdbwire_mi_result *Result, char *Variable)
 }
 
 internal void
+GdbWireBatchResultString(struct gdbwire_mi_result *Result, char *Variables[], char *Values[],
+                         u32 NumberOfVariables)
+{
+    if(Result && Variables && Values)
+    {
+        u32 StartAt = 0;
+        for(struct gdbwire_mi_result *Iterator = Result;
+            Iterator;
+            Iterator = Iterator->next)
+        {
+            for(int VariableIndex = StartAt;
+                VariableIndex < NumberOfVariables;
+                ++VariableIndex)
+            {
+                char *Variable = Variables[VariableIndex];
+                if(!Values[VariableIndex] && Iterator->variable &&
+                   Iterator->kind == GDBWIRE_MI_CSTRING &&
+                   strcmp(Variable, Iterator->variable) == 0)
+                {
+                    if(VariableIndex == StartAt)
+                    {
+                        ++StartAt;
+                    }
+                    Values[VariableIndex] = Iterator->variant.cstring;
+                    break;
+                }
+            }
+        }
+    }
+}
+
+internal inline emacs_value
+GetEmacsString_(emacs_env *Environment, char *String, bool EmptyIfNull)
+{
+    emacs_value Result = Nil;
+
+    if(!String && EmptyIfNull)
+    {
+        String = "";
+    }
+
+    if(String)
+    {
+        Result = Environment->make_string(Environment, String, strlen(String));
+    }
+
+    return Result;
+}
+#define GetEmacsString(Environment, String) GetEmacsString_(Environment, String, false)
+#define GetEmacsStringEmpty(Environment, String) GetEmacsString_(Environment, String, true)
+
+internal void
+BreakpointChange(emacs_env *Environment, struct gdbwire_mi_result *Breakpoint)
+{
+    char *Variables[] = {"number", "type", "disp", "enabled", "addr", "fullname", "line",
+                         "at", "pending", "thread", "cond", "times"};
+
+    char *Values[ArrayCount(Variables)] = {};
+    GdbWireBatchResultString(Breakpoint, Variables, Values, ArrayCount(Variables));
+
+    emacs_value Arguments[ArrayCount(Variables)];
+    for(int Index = 0;
+        Index < ArrayCount(Variables);
+        ++Index)
+    {
+        Arguments[Index] = GetEmacsString(Environment, Values[Index]);
+    }
+    emacs_value BreakpointChangedFunc = Environment->intern(Environment, "gdb--breakpoint-changed");
+    Environment->funcall(Environment, BreakpointChangedFunc, ArrayCount(Arguments), Arguments);
+}
+
+internal void
 HandleMiOobRecord(emacs_env *Environment, struct gdbwire_mi_oob_record *Record,
                   string_builder *PrintString)
 {
@@ -123,6 +198,7 @@ HandleMiOobRecord(emacs_env *Environment, struct gdbwire_mi_oob_record *Record,
         case GDBWIRE_MI_ASYNC:
         {
             struct gdbwire_mi_async_record *AsyncRecord = Record->variant.async_record;
+            struct gdbwire_mi_result *Result = AsyncRecord->result;
             switch(AsyncRecord->kind)
             {
                 case GDBWIRE_MI_EXEC:
@@ -131,6 +207,7 @@ HandleMiOobRecord(emacs_env *Environment, struct gdbwire_mi_oob_record *Record,
                     {
                         case GDBWIRE_MI_ASYNC_STOPPED:
                         {
+
                             // NOTE(nox): *stopped does not end with a prompt...
                             PushString(PrintString, "(gdb) ");
                         } break;
@@ -161,11 +238,9 @@ HandleMiOobRecord(emacs_env *Environment, struct gdbwire_mi_oob_record *Record,
                         } break;
 
                         case GDBWIRE_MI_ASYNC_BREAKPOINT_CREATED:
-                        {
-                        } break;
-
                         case GDBWIRE_MI_ASYNC_BREAKPOINT_MODIFIED:
                         {
+                            BreakpointChange(Environment, Result->variant.result);
                         } break;
 
                         case GDBWIRE_MI_ASYNC_BREAKPOINT_DELETED:
@@ -218,10 +293,10 @@ GetTokenContext(emacs_env *Environment, char *TokenString)
     token_context Result = Context_NoContext;
     if(TokenString)
     {
-        emacs_value String = Environment->make_string(Environment, TokenString, strlen(TokenString));
+        emacs_value Argument = GetEmacsString(Environment, TokenString);
         emacs_value ContextExtractor = Environment->intern(Environment, "gdb--extract-token-context");
         emacs_value Context = Environment->funcall(Environment, ContextExtractor,
-                                                   1, (emacs_value[]){String});
+                                                   1, &Argument);
         Result = Environment->extract_integer(Environment, Context);
         assert(Result < Context_Size);
     }
@@ -249,17 +324,12 @@ HandleMiResultRecord(emacs_env *Environment, struct gdbwire_mi_result_record *Re
                     char *Line = GdbWireGetResultString(Result, "line");
                     if(File)
                     {
-                        int NumArguments = 1;
                         emacs_value Arguments[2];
-                        Arguments[0] = Environment->make_string(Environment, File, strlen(File));
-                        if(Line)
-                        {
-                            ++NumArguments;
-                            Arguments[1] = Environment->make_string(Environment, Line, strlen(Line));
-                        }
+                        Arguments[0] = GetEmacsString(Environment, File);
+                        Arguments[1] = GetEmacsStringEmpty(Environment, Line);
                         emacs_value InitialFileFunc = Environment->intern(Environment,
                                                                           "gdb--set-initial-file");
-                        Environment->funcall(Environment, InitialFileFunc, NumArguments, Arguments);
+                        Environment->funcall(Environment, InitialFileFunc, 2, Arguments);
                     }
                 } break;
 
@@ -362,7 +432,7 @@ HandleGdbMiOutput(emacs_env *Environment, ptrdiff_t NumberOfArguments,
     return Result;
 }
 
-int emacs_module_init(struct emacs_runtime *EmacsRuntime)
+s32 emacs_module_init(struct emacs_runtime *EmacsRuntime)
 {
     emacs_env *Environment = EmacsRuntime->get_environment(EmacsRuntime);
 
@@ -375,6 +445,8 @@ int emacs_module_init(struct emacs_runtime *EmacsRuntime)
 
     struct gdbwire_mi_parser_callbacks Callbacks = {0, GdbWireCallback};
     GdbMiParser = gdbwire_mi_parser_create(Callbacks);
+
+    Nil = Environment->intern(Environment, "nil");
 
     emacs_value Provide = Environment->intern(Environment, "provide");
     emacs_value Feature = Environment->intern(Environment, "emacs-gdb-module");
