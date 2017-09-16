@@ -28,7 +28,7 @@ u32 plugin_is_GPL_compatible;
 internal emacs_value Nil;
 internal struct gdbwire_mi_parser *GdbMiParser;
 internal struct gdbwire_mi_output *ParserOutput;
-internal bool IgnorePrompt;
+internal bool IgnoreNextPrompt;
 
 typedef struct
 {
@@ -173,7 +173,7 @@ internal void
 BreakpointChange(emacs_env *Environment, struct gdbwire_mi_result *Breakpoint)
 {
     char *Variables[] = {"number", "type", "disp", "enabled", "addr", "func", "fullname", "line",
-                         "at", "pending", "thread", "cond", "times"};
+                         "at", "pending", "thread", "cond", "times", "what"};
 
     char *Values[ArrayCount(Variables)] = {};
     GdbWireBatchResultString(Breakpoint, Variables, Values, ArrayCount(Variables));
@@ -215,6 +215,11 @@ HandleMiOobRecord(emacs_env *Environment, struct gdbwire_mi_oob_record *Record,
                     {
                         case GDBWIRE_MI_ASYNC_STOPPED:
                         {
+                            // TODO(nox): This will eventually receive more parameters, to
+                            // update the current frame and thread and etc
+                            Environment->funcall(Environment,
+                                                 Environment->intern(Environment, "gdb--stopped"),
+                                                 0, 0);
 
                             // NOTE(nox): *stopped does not end with a prompt...
                             PushString(PrintString, "(gdb) ");
@@ -222,6 +227,9 @@ HandleMiOobRecord(emacs_env *Environment, struct gdbwire_mi_oob_record *Record,
 
                         case GDBWIRE_MI_ASYNC_RUNNING:
                         {
+                            Environment->funcall(Environment,
+                                                 Environment->intern(Environment, "gdb--running"),
+                                                 0, 0);
                         } break;
 
                         IgnoreDefaultCase;
@@ -350,6 +358,8 @@ HandleMiResultRecord(emacs_env *Environment, struct gdbwire_mi_result_record *Re
 
                 IgnoreDefaultCase;
             }
+
+            Environment->funcall(Environment, Environment->intern(Environment, "gdb--done"), 0, 0);
         } break;
 
         case GDBWIRE_MI_ERROR:
@@ -369,6 +379,10 @@ HandleMiResultRecord(emacs_env *Environment, struct gdbwire_mi_result_record *Re
                     }
                 } break;
             }
+
+            Environment->funcall(Environment,
+                                 Environment->intern(Environment, "gdb--error"),
+                                 0, 0);
         } break;
 
         case GDBWIRE_MI_EXIT:
@@ -384,7 +398,7 @@ HandleMiResultRecord(emacs_env *Environment, struct gdbwire_mi_result_record *Re
 
     if(Context != Context_NoContext)
     {
-        IgnorePrompt = true;
+        IgnoreNextPrompt = true;
     }
 }
 
@@ -429,11 +443,11 @@ HandleGdbMiOutput(emacs_env *Environment, ptrdiff_t NumberOfArguments,
 
             case GDBWIRE_MI_OUTPUT_PROMPT:
             {
-                if(!IgnorePrompt)
+                if(!IgnoreNextPrompt)
                 {
                     PushString(&PrintString, "(gdb) ");
                 }
-                IgnorePrompt = false;
+                IgnoreNextPrompt = false;
             } break;
         }
     }
