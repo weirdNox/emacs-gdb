@@ -172,7 +172,7 @@ GetEmacsString_(emacs_env *Environment, char *String, bool EmptyIfNull)
 internal void
 BreakpointChange(emacs_env *Environment, struct gdbwire_mi_result *Breakpoint)
 {
-    char *Variables[] = {"number", "type", "disp", "enabled", "addr", "fullname", "line",
+    char *Variables[] = {"number", "type", "disp", "enabled", "addr", "func", "fullname", "line",
                          "at", "pending", "thread", "cond", "times"};
 
     char *Values[ArrayCount(Variables)] = {};
@@ -187,6 +187,14 @@ BreakpointChange(emacs_env *Environment, struct gdbwire_mi_result *Breakpoint)
     }
     emacs_value BreakpointChangedFunc = Environment->intern(Environment, "gdb--breakpoint-changed");
     Environment->funcall(Environment, BreakpointChangedFunc, ArrayCount(Arguments), Arguments);
+}
+
+internal void
+BreakpointDeletion(emacs_env *Environment, char *Id)
+{
+    emacs_value Argument = GetEmacsString(Environment, Id);
+    emacs_value BreakpointDeletedFunc = Environment->intern(Environment, "gdb--breakpoint-deleted");
+    Environment->funcall(Environment, BreakpointDeletedFunc, 1, &Argument);
 }
 
 internal void
@@ -245,6 +253,7 @@ HandleMiOobRecord(emacs_env *Environment, struct gdbwire_mi_oob_record *Record,
 
                         case GDBWIRE_MI_ASYNC_BREAKPOINT_DELETED:
                         {
+                            BreakpointDeletion(Environment, Result->variant.cstring);
                         } break;
 
                         IgnoreDefaultCase;
@@ -283,6 +292,7 @@ typedef enum
 
     Context_Ignore,
     Context_InitialFile,
+    Context_BreakpointInsert,
 
     Context_Size,
 } token_context;
@@ -294,7 +304,7 @@ GetTokenContext(emacs_env *Environment, char *TokenString)
     if(TokenString)
     {
         emacs_value Argument = GetEmacsString(Environment, TokenString);
-        emacs_value ContextExtractor = Environment->intern(Environment, "gdb--extract-token-context");
+        emacs_value ContextExtractor = Environment->intern(Environment, "gdb--extract-context");
         emacs_value Context = Environment->funcall(Environment, ContextExtractor,
                                                    1, &Argument);
         Result = Environment->extract_integer(Environment, Context);
@@ -308,8 +318,8 @@ HandleMiResultRecord(emacs_env *Environment, struct gdbwire_mi_result_record *Re
                      string_builder *PrintString)
 {
     token_context Context = GetTokenContext(Environment, Record->token);
-    struct gdbwire_mi_result *Result = Record->result;
 
+    struct gdbwire_mi_result *Result = Record->result;
     switch(Record->result_class)
     {
         case GDBWIRE_MI_DONE:
@@ -331,6 +341,11 @@ HandleMiResultRecord(emacs_env *Environment, struct gdbwire_mi_result_record *Re
                                                                           "gdb--set-initial-file");
                         Environment->funcall(Environment, InitialFileFunc, 2, Arguments);
                     }
+                } break;
+
+                case Context_BreakpointInsert:
+                {
+                    BreakpointChange(Environment, Result->variant.result);
                 } break;
 
                 IgnoreDefaultCase;

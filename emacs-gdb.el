@@ -45,11 +45,14 @@
 (defvar-local gdb--frame nil
   "The Emacs frame where GDB runs.")
 
+(defvar-local gdb--current-thread nil
+  "Number of the main selected thread.")
+
 (defvar-local gdb--selected-file ""
-  "Name of the selected file for the selected thread.")
+  "Name of the selected file for the main selected thread.")
 
 (defvar-local gdb--selected-line 0
-  "Number of the selected line for the selected thread.")
+  "Number of the selected line for the main selected thread.")
 
 (defvar-local gdb--next-token 0
   "Next token for a GDB command.")
@@ -57,17 +60,48 @@
 (defvar-local gdb--token-contexts '()
   "Alist of (TOKEN . CONTEXT) pairs.
 TOKEN must be the decimal representation of a token as a string
-and CONTEXT must be a member of `gdb--available-token-contexts'.")
+and CONTEXT must be a member of `gdb--available-contexts'.")
 
-(defconst gdb--available-token-contexts
+(defconst gdb--available-contexts
   '(gdb--context-ignore
-    gdb--context-initial-file)
+    gdb--context-initial-file
+    gdb--context-breakpoint-insert)
   "List of implemented token contexts.
 Must be in the same order of the `token_context' enum in the
 dynamic module.")
 
-(defvar-local gdb--breakpoints-list nil
-  "Alist of breakpoints")
+(cl-defstruct gdb--breakpoint
+  type disp enabled addr hits what file line)
+
+(defvar-local gdb--breakpoints nil
+  "Alist of (NUMBER . BREAKPOINT) pairs.
+NUMBER is an integer and BREAKPOINT is a `gdb--breakpoint'.")
+
+(defconst gdb--available-breakpoint-types
+  '(("Breakpoint" . "")
+    ("Temporary Breakpoint" . "-t")
+    ("Hardware Breakpoint" . "-h")
+    ("Temporary Hardware Breakpoint" . "-t -h"))
+  "Alist of (TYPE . FLAGS).
+Both are strings. FLAGS are the flags to be passed to
+-break-insert in order to create a breakpoint of TYPE.")
+
+(defconst gdb--buffer-types
+  '(gdb--comint
+    gdb--inferior-io
+    gdb--breakpoints
+    gdb--threads
+    gdb--frames
+    gdb--disassembly
+    gdb--registers
+    gdb--locals
+    gdb--expression-watcher)
+  "List of available buffer types.")
+
+(defconst gdb--buffers-to-keep
+  '(gdb--comint
+    gdb--inferior-io)
+  "List of buffer types that should be kept after GDB is killed.")
 
 (defvar-local gdb--buffer-type nil
   "Type of current GDB buffer.")
@@ -82,21 +116,9 @@ Possible values are:
   - `dead', if was initialized previously, but GDB was killed afterwards
   - `t', if initialized")
 
-(defconst gdb--buffer-types
-  '(gdb--comint
-    gdb--inferior-io
-    gdb--breakpoints
-    gdb--threads
-    gdb--frames
-    gdb--registers
-    gdb--locals
-    gdb--expression-watcher)
-  "List of available buffer types.")
-
-(defconst gdb--buffers-to-keep
-  '(gdb--comint
-    gdb--inferior-io)
-  "List of buffer types that should be kept after GDB is killed.")
+(defvar-local gdb--buffers-to-update nil
+  "List of buffers types to redraw. Used when new information is
+  available.")
 
 (defun gdb--init-buffer (buffer-name)
   "Buffer initialization for GDB buffers."
@@ -140,6 +162,8 @@ Possible values are:
     (gdb--command "-gdb-set non-stop on" 'gdb--context-ignore)
     (gdb--command "-file-list-exec-source-file" 'gdb--context-initial-file)))
 
+(fset 'gdb--comint-redraw 'ignore)
+
 (defun gdb--comint-sender (process string)
   "Send user commands from comint."
   (if gdb-debug
@@ -155,30 +179,36 @@ Possible values are:
       output)))
 
 (defun gdb--comint-sentinel (process str)
+  "Handle GDB comint process state changes."
   (when (or (not (buffer-name (process-buffer process)))
             (eq (process-status process) 'exit))
     (gdb-kill)))
 
 (defun gdb--get-comint-process ()
+  "Return GDB process."
   (and gdb--comint-buffer (buffer-live-p gdb--comint-buffer) (get-buffer-process gdb--comint-buffer)))
 
 (defmacro gdb--local (&rest body)
-  "Execute body inside GDB comint buffer."
+  "Execute BODY inside GDB comint buffer."
   `(when (buffer-live-p gdb--comint-buffer)
      (with-current-buffer gdb--comint-buffer
        ,@body)))
 
-(defun gdb--command (string &optional token-context)
+(defun gdb--command (command &optional context)
+  "Execute GDB COMMAND.
+If provided, the CONTEXT is assigned to a unique token, which
+will be received, alongside the output, by the dynamic module,
+and used to know what the context of that output was."
   (let* ((process (gdb--get-comint-process))
          (token (gdb--local gdb--next-token))
          (token-string (int-to-string token)))
     (when process
-      (when (member token-context gdb--available-token-contexts)
-        (setq string (concat token-string  string))
+      (when (member context gdb--available-contexts)
+        (setq command (concat token-string command))
         (gdb--local
-         (push `(,token-string . ,token-context) gdb--token-contexts)
+         (push `(,token-string . ,context) gdb--token-contexts)
          (setq gdb--next-token (1+ gdb--next-token))))
-      (comint-simple-send process string))))
+      (comint-simple-send process command))))
 
 ;; NOTE(nox): Inferior I/O buffer
 (defun gdb--inferior-io-init ()
@@ -190,6 +220,8 @@ Possible values are:
     (gdb--command (concat "-inferior-tty-set " tty) 'gdb--context-ignore)
     (set-process-sentinel inferior-process 'gdb--inferior-io-sentinel)
     (add-hook 'kill-buffer-hook 'gdb--inferior-io-killed nil t)))
+
+(fset 'gdb--inferior-io-redraw 'ignore)
 
 (defun gdb--inferior-io-killed ()
   (with-current-buffer gdb--comint-buffer (comint-interrupt-subjob))
@@ -209,27 +241,54 @@ Possible values are:
 (defun gdb--breakpoints-init ()
   (gdb--init-buffer "Breakpoints"))
 
+(defun gdb--breakpoints-redraw ()
+  )
+
 ;; NOTE(nox): Threads buffer
 (defun gdb--threads-init ()
   (gdb--init-buffer "Threads"))
+
+(defun gdb--threads-redraw ()
+  )
 
 ;; NOTE(nox): Frames buffer
 (defun gdb--frames-init ()
   (gdb--init-buffer "Stack frames"))
 
+(defun gdb--frames-redraw ()
+  )
+
+;; NOTE(nox): Disassembly buffer
+(defun gdb--disassembly-init ()
+  (gdb--init-buffer "Stack frames"))
+
+(defun gdb--disassembly-redraw ()
+  )
+
 ;; NOTE(nox): Registers buffer
 (defun gdb--registers-init ()
   (gdb--init-buffer "Registers"))
+
+(defun gdb--registers-redraw ()
+  )
 
 ;; NOTE(nox): Locals buffer
 (defun gdb--locals-init ()
   (gdb--init-buffer "Locals"))
 
+(defun gdb--locals-redraw ()
+  )
+
 ;; NOTE(nox): Expression watcher buffer
 (defun gdb--expression-watcher-init ()
   (gdb--init-buffer "Expression watcher"))
 
+(defun gdb--expression-watcher-redraw ()
+  )
+
 (defun gdb--get-buffer (buffer-type &optional thread)
+  "Get existing GDB buffer of a specific BUFFER-TYPE and THREAD,
+when provided."
   (catch 'found
     (dolist (buffer (buffer-list))
       (with-current-buffer buffer
@@ -239,7 +298,7 @@ Possible values are:
           (throw 'found buffer))))))
 
 (defun gdb--get-buffer-create (buffer-type &optional thread)
-  "Get GDB buffer of a specific type (and thread, if specified), creating it, if needed.
+  "Get GDB buffer of a specific BUFFER-TYPE (and THREAD, if specified), creating it, if needed.
 
 When creating, assign `gdb--buffer-type' to BUFFER-TYPE and
 `gdb--thread-number' to THREAD (if provided).
@@ -260,21 +319,95 @@ BUFFER-TYPE must be a member of `gdb--buffer-types'."
           (setq gdb--thread-number thread)))
       buffer)))
 
-(defun gdb--rename-buffer (&optional extra)
+(defun gdb--rename-buffer (&optional specific)
+  "Rename special GDB buffer, using SPECIFIC when provided."
   (rename-buffer (concat "*GDB"
-                         (when (and extra (not (string= "" extra))) (concat " - " extra))
+                         (when (and specific (not (string= "" specific)))
+                           (concat " - " specific))
                          "*")
                  t))
 
+(defun gdb--complete-path (path)
+  "Add TRAMP prefix to PATH returned from GDB output, if needed."
+  (concat (gdb--local (file-remote-p default-directory)) path))
+
+(defun gdb--find-file (path)
+  "Return the buffer of the file specified by a PATH returned by
+GDB.
+Create the buffer, if it wasn't already open."
+  (let ((full-path (gdb--complete-path path))
+        buffer)
+    (when (and (file-exists-p full-path)
+               (file-readable-p full-path))
+      (setq buffer (find-file-noselect full-path)))
+    buffer))
+
+(defun gdb--display-source-buffer ()
+  "Display buffer of the selected source."
+  (gdb--local
+   (let ((buffer (gdb--find-file gdb--selected-file))
+         (line gdb--selected-line)
+         (window))
+     (when buffer
+       (with-selected-frame gdb--frame
+         (with-current-buffer buffer
+           (goto-char (point-min))
+           (forward-line (1- line)))
+         (setq window (display-buffer buffer))
+         (when window
+           ;; NOTE(nox): This is needed in order to keep `display-buffer-use-some-window'
+           ;; from resizing it... Maybe should look for an alternative?
+           (set-window-parameter window 'quit-restore nil)
+           (with-selected-window window (recenter-top-bottom 0))))))))
+
+(defun gdb--set-window-buffer (window buffer)
+  (set-window-dedicated-p window nil)
+  (set-window-buffer window buffer)
+  (set-window-dedicated-p window t))
+
+(defun gdb--setup-windows ()
+  (delete-other-windows)
+  (let* ((top-left (selected-window))
+         (middle-left (split-window))
+         (bottom-left (split-window middle-left))
+         (top-right (split-window top-left nil t))
+         (middle-right (split-window middle-left nil t))
+         (bottom-right (split-window bottom-left nil t)))
+    (balance-windows)
+    (gdb--set-window-buffer top-left (gdb--get-buffer-create 'gdb--comint))
+    (gdb--set-window-buffer top-right (gdb--get-buffer-create 'gdb--locals))
+    (gdb--set-window-buffer middle-right (gdb--get-buffer-create 'gdb--inferior-io))
+    (gdb--set-window-buffer bottom-left (gdb--get-buffer-create 'gdb--frames))
+    (gdb--set-window-buffer bottom-right (gdb--get-buffer-create 'gdb--breakpoints))
+    (gdb--display-source-buffer)))
+
+(defun gdb--current-line ()
+  "Return an integer of the current line of point in the current
+buffer."
+  (save-restriction
+    (widen)
+    (save-excursion
+      (beginning-of-line)
+      (1+ (count-lines 1 (point))))))
+
+(defun gdb--current-location ()
+  "Return a string with the location of the point, in a source
+file or in a special GDB buffer (eg. disassembly buffer)."
+  (cond ((eq gdb--buffer-type 'gdb--disassembly) ;; TODO(nox): Do this when disassembly is done
+         )
+        ((buffer-file-name)
+         (concat (buffer-file-name) ":" (int-to-string (gdb--current-line))))))
+
 ;; NOTE(nox): Functions to be called by the dynamic module
-(defun gdb--extract-token-context (token-string)
+(defun gdb--extract-context (token-string)
+  "Get the context assigned to TOKEN-STRING, deleting it."
   (let* ((context (assoc token-string (gdb--local gdb--token-contexts)))
          (result 1))
     (when context
       (gdb--local (setq gdb--token-contexts (delq context gdb--token-contexts)))
       (setq context (cdr context))
       (catch 'found
-        (dolist (test-context gdb--available-token-contexts)
+        (dolist (test-context gdb--available-contexts)
           (when (eq context test-context) (throw 'found result))
           (setq result (1+ result)))
         0))))
@@ -284,9 +417,42 @@ BUFFER-TYPE must be a member of `gdb--buffer-types'."
                     gdb--selected-line (string-to-int line-string)))
   (gdb--display-source-buffer))
 
-(defun gdb--breakpoint-changed (number type disp enabled addr fullname line at pending thread cond
-                                       times)
-  )                                     ; TODO(nox): Finish this!
+(defun gdb--breakpoint-changed (number type disp enabled addr func fullname line at
+                                       pending thread cond times)
+  ;; TODO(nox): Handle watchpoint
+  (gdb--local
+   (let* ((number (string-to-int number))
+          (breakpoint
+           (make-gdb--breakpoint
+            :type (or type "")
+            :disp (or disp "")
+            :enabled (if (string= enabled "y")
+                         (eval-when-compile (propertize "y" 'font-lock-face font-lock-warning-face))
+                       (eval-when-compile (propertize "n" 'font-lock-face font-lock-comment-face)))
+            :addr (or addr "")
+            :hits (or times "")
+            :what (concat (or pending at
+                              (concat "in "
+                                      (propertize (or func "unknown")
+                                                  'font-lock-face font-lock-function-name-face)
+                                      (and fullname line (concat " at "
+                                                                 (file-name-nondirectory fullname)
+                                                                 ":"
+                                                                 line))))
+                          (and cond (concat " if " cond))
+                          (and thread (concat " on " thread)))
+            :file fullname
+            :line line))
+          (existing (assq number gdb--breakpoints)))
+     (if existing
+         (setf (alist-get number gdb--breakpoints) breakpoint)
+       (add-to-list 'gdb--breakpoints `(,number . ,breakpoint) t)))))
+
+(defun gdb--breakpoint-deleted (number)
+  (gdb--local
+   (setq number (string-to-int number))
+   (setq gdb--breakpoints (assq-delete-all number gdb--breakpoints))
+   (setq gdb--update-breakpoints t)))
 
 ;; ----------------------------------------------------------------------
 ;; NOTE(nox): Everything enclosed in here was adapted from gdb-mi.el
@@ -351,51 +517,53 @@ calling `gdb--table-string'."
      "\n")))
 ;; ----------------------------------------------------------------------
 
-(defun gdb--find-file (path)
-  (let ((full-path (gdb--local (expand-file-name path)))
-        (buffer))
-    (when (and (file-exists-p full-path)
-               (file-readable-p full-path))
-      (setq buffer (find-file-noselect full-path)))
-    buffer))
+;; NOTE(nox): User commands
+(defun gdb-break (arg)
+  "TODO"
+  (interactive "P")
+  (let ((location (gdb--current-location))
+        (type "")
+        (thread "")
+        (condition "")
+        command)
+    (when (not location) (setq arg '(4)))
+    (when arg
+      (setq type (cdr
+                  (assoc
+                   (completing-read "Type of breakpoint: " gdb--available-breakpoint-types nil
+                                    t nil nil "Breakpoint")
+                   gdb--available-breakpoint-types)))
+      ;; TODO(nox): Be able to select a thread from here
+      (setq condition (read-from-minibuffer "Condition: ")))
+    (gdb--command (concat "-break-insert -f " type
+                          (and (> (length condition) 0) (concat " -c " (gdb--escape-argument
+                                                                        condition)))
+                          (and (> (length thread) 0) (concat " -p " thread))
+                          " " location)
+                  'gdb--context-breakpoint-insert)))
 
-(defun gdb--display-source-buffer ()
-  (gdb--local
-   (let ((buffer (gdb--find-file gdb--selected-file))
-         (line gdb--selected-line)
-         (window))
-     (when buffer
-       (with-selected-frame gdb--frame
-         (with-current-buffer buffer
-           (goto-char (point-min))
-           (forward-line (1- line)))
-         (setq window (display-buffer buffer))
-         (when window
-           ;; NOTE(nox): This is needed in order to keep `display-buffer-use-some-window'
-           ;; from resizing it... Maybe should look for an alternative?
-           (set-window-parameter window 'quit-restore nil)
-           (with-selected-window window (recenter-top-bottom 0))))))))
-
-(defun gdb--set-window-buffer (window buffer)
-  (set-window-dedicated-p window nil)
-  (set-window-buffer window buffer)
-  (set-window-dedicated-p window t))
-
-(defun gdb--setup-windows ()
-  (delete-other-windows)
-  (let* ((top-left (selected-window))
-         (middle-left (split-window))
-         (bottom-left (split-window middle-left))
-         (top-right (split-window top-left nil t))
-         (middle-right (split-window middle-left nil t))
-         (bottom-right (split-window bottom-left nil t)))
-    (balance-windows)
-    (gdb--set-window-buffer top-left (gdb--get-buffer-create 'gdb--comint))
-    (gdb--set-window-buffer top-right (gdb--get-buffer-create 'gdb--locals))
-    (gdb--set-window-buffer middle-right (gdb--get-buffer-create 'gdb--inferior-io))
-    (gdb--set-window-buffer bottom-left (gdb--get-buffer-create 'gdb--frames))
-    (gdb--set-window-buffer bottom-right (gdb--get-buffer-create 'gdb--breakpoints))
-    (gdb--display-source-buffer)))
+(defun gdb-delete-breakpoint ()
+  "TODO"
+  (interactive)
+  (let* (number-string
+         (file (expand-file-name (buffer-file-name)))
+         (line (int-to-string (gdb--current-line))))
+    (cond ((eq gdb--buffer-type 'gdb--breakpoints)
+           ;; TODO(nox): Do this when the breakpoints window is ready
+           )
+          ((eq gdb--buffer-type 'gdb--disassembly)
+           ;; TODO(nox): Do this when the disassembly window is ready
+           )
+          (file
+           (catch 'found
+             (dolist (breakpoint (gdb--local gdb--breakpoints))
+               (when (and (string= file (gdb--breakpoint-file (cdr breakpoint)))
+                          (string= line (gdb--breakpoint-line (cdr breakpoint))))
+                 (setq number-string (int-to-string (car breakpoint)))
+                 (throw 'found t))))))
+    (when number-string
+      (gdb--breakpoint-deleted number-string)
+      (gdb--command (concat "-break-delete " number-string) 'gdb--context-ignore))))
 
 (defun gdb-kill (&optional frame)
   "Kill GDB, and delete frame if there are more visible frames.
