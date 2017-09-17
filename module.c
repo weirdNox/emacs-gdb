@@ -243,14 +243,20 @@ HandleMiOobRecord(emacs_env *Environment, struct gdbwire_mi_oob_record *Record,
                         // TODO(nox): Check if we need more handlers
                         case GDBWIRE_MI_ASYNC_THREAD_CREATED:
                         {
+                            // NOTE(nox): This notification doesn't provide enough information
+                            Environment->funcall(Environment, Environment->intern(Environment,
+                                                                                  "gdb--thread-created"),
+                                                 0, 0);
                         } break;
 
                         case GDBWIRE_MI_ASYNC_THREAD_SELECTED:
                         {
+                            // TODO(nox): Send selection
                         } break;
 
                         case GDBWIRE_MI_ASYNC_THREAD_EXITED:
                         {
+                            // TODO(nox): Remove and update UI
                         } break;
 
                         case GDBWIRE_MI_ASYNC_BREAKPOINT_CREATED:
@@ -301,6 +307,7 @@ typedef enum
     Context_Ignore,
     Context_InitialFile,
     Context_BreakpointInsert,
+    Context_ThreadInfo,
 
     Context_Size,
 } token_context;
@@ -354,6 +361,11 @@ HandleMiResultRecord(emacs_env *Environment, struct gdbwire_mi_result_record *Re
                 case Context_BreakpointInsert:
                 {
                     BreakpointChange(Environment, Result->variant.result);
+                } break;
+
+                case Context_ThreadInfo:
+                {
+                    // TODO(nox): Complete this
                 } break;
 
                 IgnoreDefaultCase;

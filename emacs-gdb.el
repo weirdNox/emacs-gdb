@@ -70,7 +70,8 @@ and CONTEXT must be a member of `gdb--available-contexts'.")
 (defconst gdb--available-contexts
   '(gdb--context-ignore
     gdb--context-initial-file
-    gdb--context-breakpoint-insert)
+    gdb--context-breakpoint-insert
+    gdb--context-thread-info)
   "List of implemented token contexts.
 Must be in the same order of the `token_context' enum in the
 dynamic module.")
@@ -107,6 +108,11 @@ Both are strings. FLAGS are the flags to be passed to
      :inverse-video t)
     (t :background "gray"))
   "Face for disabled breakpoint icon in fringe.")
+
+(cl-defstruct gdb--thread target-id state core details)
+(defvar-local gdb--threads nil
+  "Alist of (ID . THREAD) pairs.
+ID is an integer and thread is a `gdb--thread'.")
 
 (defvar-local gdb--source-buffer nil
   "Specifies whether or not this buffer is a source file buffer.")
@@ -548,6 +554,8 @@ or in a special GDB buffer (eg. disassembly buffer)."
    (setq gdb--breakpoints (assq-delete-all number gdb--breakpoints))
    (add-to-list 'gdb--buffers-to-update 'gdb--breakpoints)))
 
+(defun gdb--thread-created ()
+  (gdb--command "-thread-info" 'gdb--context-thread-info)
 ;; ----------------------------------------------------------------------
 ;; NOTE(nox): Everything enclosed in here was adapted from gdb-mi.el
 (defun gdb--escape-argument (string)
