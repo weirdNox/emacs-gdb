@@ -554,8 +554,7 @@ or in a special GDB buffer (eg. disassembly buffer)."
    (setq gdb--breakpoints (assq-delete-all number gdb--breakpoints))
    (add-to-list 'gdb--buffers-to-update 'gdb--breakpoints)))
 
-(defun gdb--thread-created ()
-  (gdb--command "-thread-info" 'gdb--context-thread-info)
+
 ;; ----------------------------------------------------------------------
 ;; NOTE(nox): Everything enclosed in here was adapted from gdb-mi.el
 (defun gdb--escape-argument (string)

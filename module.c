@@ -4,11 +4,11 @@
 
 #define internal static
 
-#define ArrayCount(x) (sizeof(x) / sizeof(*(x)))
+#define ArrayCount(Array) (sizeof(Array) / sizeof(*(Array)))
 
 #define InvalidCodePath assert(0)
 #define InvalidDefaultCase default: { InvalidCodePath(); } break
-#define IgnoreCase(x) case (x): break
+#define IgnoreCase(Case) case (Case): break
 #define IgnoreDefaultCase default: break
 
 typedef uint8_t  u8;
@@ -95,20 +95,21 @@ GdbWireCallback(void *Context, struct gdbwire_mi_output *Output)
     *WriteTo = Output;
 }
 
-internal char *
-GdbWireGetResultString(struct gdbwire_mi_result *Result, char *Variable)
+internal void *
+GetResultVariable_(struct gdbwire_mi_result *Result, char *Variable,
+                   enum gdbwire_mi_result_kind Kind)
 {
-    char *ToReturn = 0;
+    void *ToReturn = 0;
     if(Result && Variable)
     {
         for(;
             Result;
             Result = Result->next)
         {
-            if(Result->variable && Result->kind == GDBWIRE_MI_CSTRING &&
+            if(Result->variable && Result->kind == Kind &&
                strcmp(Variable, Result->variable) == 0)
             {
-                ToReturn = Result->variant.cstring;
+                ToReturn = &Result->variant;
                 break;
             }
         }
@@ -116,9 +117,15 @@ GdbWireGetResultString(struct gdbwire_mi_result *Result, char *Variable)
 
     return ToReturn;
 }
+#define GetResultTuple(Result, Variable)                                \
+    (struct gdbwire_mi_result *)GetResultVariable_(Result, Variable, GDBWIRE_MI_TUPLE)
+#define GetResultList(Result, Variable)                                 \
+    (struct gdbwire_mi_result *)GetResultVariable_(Result, Variable, GDBWIRE_MI_LIST)
+#define GetResultString(Result, Variable)                               \
+    (char *)GetResultVariable_(Result, Variable, GDBWIRE_MI_CSTRING)
 
 internal void
-GdbWireBatchResultString(struct gdbwire_mi_result *Result, char *Variables[], char *Values[],
+GetBatchResultString(struct gdbwire_mi_result *Result, char *Variables[], char *Values[],
                          u32 NumberOfVariables)
 {
     if(Result && Variables && Values)
@@ -143,6 +150,11 @@ GdbWireBatchResultString(struct gdbwire_mi_result *Result, char *Variables[], ch
                     }
                     Values[VariableIndex] = Iterator->variant.cstring;
                     break;
+                }
+                else if(Iterator->kind != GDBWIRE_MI_CSTRING && VariableIndex == StartAt)
+                {
+                    // NOTE(nox): We can safely ignore this one next time.
+                    ++StartAt;
                 }
             }
         }
@@ -170,13 +182,33 @@ GetEmacsString_(emacs_env *Environment, char *String, bool EmptyIfNull)
 #define GetEmacsStringEmpty(Environment, String) GetEmacsString_(Environment, String, true)
 
 internal void
+ThreadInfo(emacs_env *Environment, struct gdbwire_mi_result *Result)
+{
+    struct gdbwire_mi_result *Threads = GetResultTuple(Result, "threads");
+    char *CurrentThread = GetResultString(Result, "current-thread-id");
+
+    // IMPORTANT TODO(nox): Finish this, I think I want to use an X-MACRO in here, to
+    // refer to the variables after
+    char *Variables[] = {"id", "target_id", "name", "state", "core"};
+
+    for(struct gdbwire_mi_result *Iterator = Threads;
+        Iterator && Iterator->kind == GDBWIRE_MI_TUPLE;
+        Iterator = Iterator->next)
+    {
+        char *Values[ArrayCount(Variables)] = {};
+        GetBatchResultString(Iterator, Variables, Values, ArrayCount(Variables));
+
+    }
+}
+
+internal void
 BreakpointChange(emacs_env *Environment, struct gdbwire_mi_result *Breakpoint)
 {
     char *Variables[] = {"number", "type", "disp", "enabled", "addr", "func", "fullname", "line",
                          "at", "pending", "thread", "cond", "times", "what"};
 
     char *Values[ArrayCount(Variables)] = {};
-    GdbWireBatchResultString(Breakpoint, Variables, Values, ArrayCount(Variables));
+    GetBatchResultString(Breakpoint, Variables, Values, ArrayCount(Variables));
 
     emacs_value Arguments[ArrayCount(Variables)];
     for(int Index = 0;
@@ -244,9 +276,13 @@ HandleMiOobRecord(emacs_env *Environment, struct gdbwire_mi_oob_record *Record,
                         case GDBWIRE_MI_ASYNC_THREAD_CREATED:
                         {
                             // NOTE(nox): This notification doesn't provide enough information
-                            Environment->funcall(Environment, Environment->intern(Environment,
-                                                                                  "gdb--thread-created"),
-                                                 0, 0);
+                            emacs_value GdbCommandFunc = Environment->intern(Environment,
+                                                                             "gdb--command");
+                            emacs_value Arguments[2];
+                            Arguments[0] = GetEmacsString(Environment, "-thread-info");
+                            Arguments[1] = Environment->intern(Environment,
+                                                               "gdb--context-thread-info");
+                            Environment->funcall(Environment, GdbCommandFunc, 2, Arguments);
                         } break;
 
                         case GDBWIRE_MI_ASYNC_THREAD_SELECTED:
@@ -345,8 +381,8 @@ HandleMiResultRecord(emacs_env *Environment, struct gdbwire_mi_result_record *Re
             {
                 case Context_InitialFile:
                 {
-                    char *File = GdbWireGetResultString(Result, "fullname");
-                    char *Line = GdbWireGetResultString(Result, "line");
+                    char *File = GetResultString(Result, "fullname");
+                    char *Line = GetResultString(Result, "line");
                     if(File)
                     {
                         emacs_value Arguments[2];
@@ -365,7 +401,7 @@ HandleMiResultRecord(emacs_env *Environment, struct gdbwire_mi_result_record *Re
 
                 case Context_ThreadInfo:
                 {
-                    // TODO(nox): Complete this
+                    ThreadInfo(Environment, Result);
                 } break;
 
                 IgnoreDefaultCase;
@@ -384,7 +420,7 @@ HandleMiResultRecord(emacs_env *Environment, struct gdbwire_mi_result_record *Re
 
                 default:
                 {
-                    char *Message = GdbWireGetResultString(Result, "msg");
+                    char *Message = GetResultString(Result, "msg");
                     if(Message)
                     {
                         PushString(PrintString, "%s\n", Result->variant.cstring);
