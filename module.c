@@ -181,65 +181,6 @@ GetEmacsString_(emacs_env *Environment, char *String, bool EmptyIfNull)
 #define GetEmacsStringEmpty(Environment, String) GetEmacsString_(Environment, String, true)
 
 internal void
-ThreadInfo(emacs_env *Environment, struct gdbwire_mi_result *Result)
-{
-    struct gdbwire_mi_result *Threads = GetResultList(Result, "threads");
-
-#define ThreadVariablesWriter(W) W(Id, id),     \
-        W(TargetId, target-id),                 \
-        W(Name, name),                          \
-        W(State, state),                        \
-        W(Core, core)
-    enum { ThreadVariablesWriter(WriteVariableKey) };
-    char *ThreadVariables[] = { ThreadVariablesWriter(WriteVariableName) };
-
-#define FrameVariablesWriter(W) W(Level, level),    \
-        W(Address, addr),                           \
-        W(Function, func),                          \
-        W(File, fullname),                          \
-        W(Line, line)
-    enum { FrameVariablesWriter(WriteVariableKey) };
-    char *FrameVariables[] = { FrameVariablesWriter(WriteVariableName) };
-
-    for(struct gdbwire_mi_result *Thread = Threads;
-        Thread && Thread->kind == GDBWIRE_MI_TUPLE;
-        Thread = Thread->next)
-    {
-        struct gdbwire_mi_result *ThreadContents = Thread->variant.result;
-        char *ThreadValues[ArrayCount(ThreadVariables)] = {};
-        char *FrameValues[ArrayCount(FrameVariables)] = {};
-        emacs_value Arguments[ArrayCount(ThreadValues) + ArrayCount(FrameValues)];
-
-        GetBatchResultString(ThreadContents, ThreadVariables, ThreadValues,
-                             ArrayCount(ThreadVariables));
-
-        if(strcmp("stopped", ThreadValues[Variable_State]) == 0)
-        {
-            struct gdbwire_mi_result *Frame = GetResultTuple(ThreadContents, "frame");
-            GetBatchResultString(Frame, FrameVariables, FrameValues, ArrayCount(FrameVariables));
-        }
-
-        for(int ThreadValueIndex = 0;
-            ThreadValueIndex < ArrayCount(ThreadVariables);
-            ++ThreadValueIndex)
-        {
-            Arguments[ThreadValueIndex] = GetEmacsString(Environment,
-                                                         ThreadValues[ThreadValueIndex]);
-        }
-        for(int FrameValueIndex = 0;
-            FrameValueIndex < ArrayCount(FrameVariables);
-            ++FrameValueIndex)
-        {
-            Arguments[ArrayCount(ThreadVariables) + FrameValueIndex] =
-                GetEmacsString(Environment, FrameValues[FrameValueIndex]);
-        }
-
-        emacs_value UpdateThreadFunction = Environment->intern(Environment, "gdb--update-thread");
-        Environment->funcall(Environment, UpdateThreadFunction, ArrayCount(Arguments), Arguments);
-    }
-}
-
-internal void
 BreakpointChange(emacs_env *Environment, struct gdbwire_mi_result *Breakpoint)
 {
 #define BreakpointVariablesWriter(W) W(Number, number), \
@@ -279,6 +220,66 @@ BreakpointDeletion(emacs_env *Environment, char *Id)
     emacs_value Argument = GetEmacsString(Environment, Id);
     emacs_value BreakpointDeletedFunc = Environment->intern(Environment, "gdb--breakpoint-deleted");
     Environment->funcall(Environment, BreakpointDeletedFunc, 1, &Argument);
+}
+
+internal void
+ThreadInfo(emacs_env *Environment, struct gdbwire_mi_result *Result)
+{
+    struct gdbwire_mi_result *Threads = GetResultList(Result, "threads");
+
+#define ThreadVariablesWriter(W) W(Id, id),     \
+        W(TargetId, target-id),                 \
+        W(Name, name),                          \
+        W(State, state),                        \
+        W(Core, core)
+    enum { ThreadVariablesWriter(WriteVariableKey) };
+    char *ThreadVariables[] = { ThreadVariablesWriter(WriteVariableName) };
+
+#define FrameVariablesWriter(W) W(Address, addr),   \
+        W(Function, func),                          \
+        W(File, fullname),                          \
+        W(Line, line),                              \
+        W(From, from)
+    enum { FrameVariablesWriter(WriteVariableKey) };
+    char *FrameVariables[] = { FrameVariablesWriter(WriteVariableName) };
+
+    for(struct gdbwire_mi_result *Thread = Threads;
+        Thread && Thread->kind == GDBWIRE_MI_TUPLE;
+        Thread = Thread->next)
+    {
+        struct gdbwire_mi_result *ThreadContents = Thread->variant.result;
+        char *ThreadValues[ArrayCount(ThreadVariables)] = {};
+        char *FrameValues[ArrayCount(FrameVariables)] = {};
+        emacs_value Arguments[ArrayCount(ThreadValues) + ArrayCount(FrameValues)];
+
+        GetBatchResultString(ThreadContents, ThreadVariables, ThreadValues,
+                             ArrayCount(ThreadVariables));
+
+        if(strcmp("stopped", ThreadValues[Variable_State]) == 0)
+        {
+            struct gdbwire_mi_result *Frame = GetResultTuple(ThreadContents, "frame");
+            GetBatchResultString(Frame, FrameVariables, FrameValues, ArrayCount(FrameVariables));
+            // TODO(nox): Fetch arguments
+        }
+
+        for(int ThreadValueIndex = 0;
+            ThreadValueIndex < ArrayCount(ThreadVariables);
+            ++ThreadValueIndex)
+        {
+            Arguments[ThreadValueIndex] = GetEmacsString(Environment,
+                                                         ThreadValues[ThreadValueIndex]);
+        }
+        for(int FrameValueIndex = 0;
+            FrameValueIndex < ArrayCount(FrameVariables);
+            ++FrameValueIndex)
+        {
+            Arguments[ArrayCount(ThreadVariables) + FrameValueIndex] =
+                GetEmacsString(Environment, FrameValues[FrameValueIndex]);
+        }
+
+        emacs_value UpdateThreadFunction = Environment->intern(Environment, "gdb--thread-updated");
+        Environment->funcall(Environment, UpdateThreadFunction, ArrayCount(Arguments), Arguments);
+    }
 }
 
 internal void
@@ -335,11 +336,6 @@ HandleMiOobRecord(emacs_env *Environment, struct gdbwire_mi_oob_record *Record,
                             Arguments[1] = Environment->intern(Environment,
                                                                "gdb--context-thread-info");
                             Environment->funcall(Environment, GdbCommandFunc, 2, Arguments);
-                        } break;
-
-                        case GDBWIRE_MI_ASYNC_THREAD_SELECTED:
-                        {
-                            // TODO(nox): Send selection
                         } break;
 
                         case GDBWIRE_MI_ASYNC_THREAD_EXITED:

@@ -49,7 +49,10 @@
   "Window where GDB shows its source files.")
 
 (defvar-local gdb--current-thread nil
-  "Number of the main selected thread.")
+  "Number of the selected thread.")
+
+(defvar-local gdb--current-frame nil
+  "Number of the selected thread frame.")
 
 (defvar-local gdb--selected-file ""
   "Name of the selected file for the main selected thread.")
@@ -109,7 +112,7 @@ Both are strings. FLAGS are the flags to be passed to
     (t :background "gray"))
   "Face for disabled breakpoint icon in fringe.")
 
-(cl-defstruct gdb--frame level addr func file line)
+(cl-defstruct gdb--frame addr func file line from)
 (cl-defstruct gdb--thread target-id name state core frame)
 (defvar-local gdb--threads nil
   "Alist of (ID . THREAD) pairs.
@@ -228,6 +231,7 @@ Possible values are:
      (with-current-buffer gdb--comint-buffer
        ,@body)))
 
+;; TODO(nox): Add support for running in selected thread/frame
 (defun gdb--command (command &optional context)
   "Execute GDB COMMAND.
 If provided, the CONTEXT is assigned to a unique token, which
@@ -278,8 +282,7 @@ and used to know what the context of that output was."
 (defun gdb--breakpoints-update ()
   (gdb--remove-all-breakpoint-symbols)
   (let ((breakpoints (gdb--local gdb--breakpoints))
-        (table (make-gdb--table))
-        breakpoint)
+        (table (make-gdb--table)))
     (gdb--table-add-row table '("Num" "Type" "Disp" "Enb" "Addr" "Hits" "What"))
     (dolist (breakpoint-cons breakpoints)
       (let* ((number (int-to-string (car breakpoint-cons)))
@@ -334,7 +337,35 @@ and used to know what the context of that output was."
   (gdb--init-buffer "Threads"))
 
 (defun gdb--threads-update ()
-  )
+  (let ((threads (gdb--local gdb--threads))
+        (table (make-gdb--table)))
+    (gdb--table-add-row table '("ID" "TgtID" "Name" "State" "Core" "Frame"))
+    (dolist (thread-cons threads)
+      (let* ((id (int-to-string (car thread-cons)))
+             (thread (cdr thread-cons))
+             (target-id (gdb--thread-target-id thread))
+             (name (gdb--thread-name thread))
+             (state (gdb--thread-state thread))
+             (core (gdb--thread-core thread))
+             (frame (gdb--threads-frame-string (gdb--thread-frame thread))))
+        (gdb--table-add-row table (list id target-id name state core frame)
+                            `(gdb--thread-id ,id))))
+    (erase-buffer)
+    (insert (gdb--table-string table " "))))
+
+(defun gdb--threads-frame-string (frame)
+  (if frame
+    (let ((addr (gdb--frame-addr frame))
+          (func (gdb--frame-func frame))
+          (file (file-name-nondirectory (gdb--frame-file frame)))
+          (line (gdb--frame-line frame))
+          (from (gdb--frame-from frame)))
+      (concat
+       "in " (propertize (or func "unknown") 'font-lock-face font-lock-function-name-face)
+       " at " addr
+       (or (and file line (concat " of " file ":" line))
+           (and from (concat " of " from)))))
+    "No information"))
 
 ;; NOTE(nox): Frames buffer
 (defun gdb--frames-init ()
@@ -458,7 +489,7 @@ Create the buffer, if it wasn't already open."
     (gdb--set-window-buffer top-left (gdb--get-buffer-create 'gdb--comint))
     (gdb--set-window-buffer top-right (gdb--get-buffer-create 'gdb--locals))
     (gdb--set-window-buffer middle-right (gdb--get-buffer-create 'gdb--inferior-io))
-    (gdb--set-window-buffer bottom-left (gdb--get-buffer-create 'gdb--frames))
+    (gdb--set-window-buffer bottom-left (gdb--get-buffer-create 'gdb--threads))
     (gdb--set-window-buffer bottom-right (gdb--get-buffer-create 'gdb--breakpoints))
     (gdb--local (setq gdb--source-window middle-left))
     (gdb--display-source-buffer)))
@@ -520,29 +551,6 @@ or in a special GDB buffer (eg. disassembly buffer)."
                     gdb--selected-line (string-to-int line-string)))
   (gdb--display-source-buffer))
 
-(defun gdb--update-thread (id target-id name state core level addr func file line)
-  (gdb--local
-   (let* ((id (string-to-int id))
-          (thread
-           (make-gdb--thread
-            :target-id target-id
-            :name (or name "")
-            :state state
-            :core (or core "")
-            :frame
-            (and level
-                 (make-gdb--frame
-                  :level level
-                  :addr addr
-                  :func (or func "")
-                  :file file
-                  :line line))))
-          (existing (assq id gdb--threads)))
-     (if existing
-         (setf (alist-get id gdb--threads) thread)
-       (add-to-list 'gdb--threads `(,id . ,thread) t))
-     (add-to-list 'gdb--buffers-to-update 'gdb--threads))))
-
 (defun gdb--breakpoint-changed (number type disp enabled addr func fullname line at
                                        pending thread cond times what)
   (gdb--local
@@ -577,6 +585,32 @@ or in a special GDB buffer (eg. disassembly buffer)."
    (setq number (string-to-int number))
    (setq gdb--breakpoints (assq-delete-all number gdb--breakpoints))
    (add-to-list 'gdb--buffers-to-update 'gdb--breakpoints)))
+
+(defun gdb--thread-updated (id target-id name state core addr func file line from)
+  (gdb--local
+   (let* ((id (string-to-int id))
+          (thread
+           (make-gdb--thread
+            :target-id target-id
+            :name (or name "")
+            :state state
+            :core (or core "")
+            :frame
+            (and addr
+                 (make-gdb--frame
+                  :addr addr
+                  :func (or func "")
+                  :file file
+                  :line line
+                  :from from))))
+          (existing (assq id gdb--threads)))
+     (if existing
+         (setf (alist-get id gdb--threads) thread)
+       (add-to-list 'gdb--threads `(,id . ,thread) t))
+     (add-to-list 'gdb--buffers-to-update 'gdb--threads))))
+
+(defun gdb--thread-exited (id)
+  )
 
 
 ;; ----------------------------------------------------------------------
