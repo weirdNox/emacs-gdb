@@ -109,7 +109,8 @@ Both are strings. FLAGS are the flags to be passed to
     (t :background "gray"))
   "Face for disabled breakpoint icon in fringe.")
 
-(cl-defstruct gdb--thread target-id state core details)
+(cl-defstruct gdb--frame level addr func file line)
+(cl-defstruct gdb--thread target-id name state core frame)
 (defvar-local gdb--threads nil
   "Alist of (ID . THREAD) pairs.
 ID is an integer and thread is a `gdb--thread'.")
@@ -518,6 +519,29 @@ or in a special GDB buffer (eg. disassembly buffer)."
   (gdb--local (setq gdb--selected-file (gdb--complete-path file)
                     gdb--selected-line (string-to-int line-string)))
   (gdb--display-source-buffer))
+
+(defun gdb--update-thread (id target-id name state core level addr func file line)
+  (gdb--local
+   (let* ((id (string-to-int id))
+          (thread
+           (make-gdb--thread
+            :target-id target-id
+            :name (or name "")
+            :state state
+            :core (or core "")
+            :frame
+            (and level
+                 (make-gdb--frame
+                  :level level
+                  :addr addr
+                  :func (or func "")
+                  :file file
+                  :line line))))
+          (existing (assq id gdb--threads)))
+     (if existing
+         (setf (alist-get id gdb--threads) thread)
+       (add-to-list 'gdb--threads `(,id . ,thread) t))
+     (add-to-list 'gdb--buffers-to-update 'gdb--threads))))
 
 (defun gdb--breakpoint-changed (number type disp enabled addr func fullname line at
                                        pending thread cond times what)

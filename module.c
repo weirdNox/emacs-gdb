@@ -11,6 +11,9 @@
 #define IgnoreCase(Case) case (Case): break
 #define IgnoreDefaultCase default: break
 
+#define WriteVariableKey(Key, Name) Variable_##Key
+#define WriteVariableName(Key, Name) #Name
+
 typedef uint8_t  u8;
 typedef uint16_t u16;
 typedef uint32_t u32;
@@ -109,7 +112,7 @@ GetResultVariable_(struct gdbwire_mi_result *Result, char *Variable,
             if(Result->variable && Result->kind == Kind &&
                strcmp(Variable, Result->variable) == 0)
             {
-                ToReturn = &Result->variant;
+                ToReturn = Result->variant.result;
                 break;
             }
         }
@@ -126,7 +129,7 @@ GetResultVariable_(struct gdbwire_mi_result *Result, char *Variable,
 
 internal void
 GetBatchResultString(struct gdbwire_mi_result *Result, char *Variables[], char *Values[],
-                         u32 NumberOfVariables)
+                     u32 NumberOfVariables)
 {
     if(Result && Variables && Values)
     {
@@ -135,26 +138,22 @@ GetBatchResultString(struct gdbwire_mi_result *Result, char *Variables[], char *
             Iterator;
             Iterator = Iterator->next)
         {
-            for(int VariableIndex = StartAt;
-                VariableIndex < NumberOfVariables;
-                ++VariableIndex)
+            if(Iterator->kind == GDBWIRE_MI_CSTRING && Iterator->variable)
             {
-                char *Variable = Variables[VariableIndex];
-                if(!Values[VariableIndex] && Iterator->variable &&
-                   Iterator->kind == GDBWIRE_MI_CSTRING &&
-                   strcmp(Variable, Iterator->variable) == 0)
+                for(int VariableIndex = StartAt;
+                    VariableIndex < NumberOfVariables;
+                    ++VariableIndex)
                 {
-                    if(VariableIndex == StartAt)
+                    char *Variable = Variables[VariableIndex];
+                    if(!Values[VariableIndex] && strcmp(Variable, Iterator->variable) == 0)
                     {
-                        ++StartAt;
+                        if(VariableIndex == StartAt)
+                        {
+                            ++StartAt;
+                        }
+                        Values[VariableIndex] = Iterator->variant.cstring;
+                        break;
                     }
-                    Values[VariableIndex] = Iterator->variant.cstring;
-                    break;
-                }
-                else if(Iterator->kind != GDBWIRE_MI_CSTRING && VariableIndex == StartAt)
-                {
-                    // NOTE(nox): We can safely ignore this one next time.
-                    ++StartAt;
                 }
             }
         }
@@ -184,35 +183,88 @@ GetEmacsString_(emacs_env *Environment, char *String, bool EmptyIfNull)
 internal void
 ThreadInfo(emacs_env *Environment, struct gdbwire_mi_result *Result)
 {
-    struct gdbwire_mi_result *Threads = GetResultTuple(Result, "threads");
-    char *CurrentThread = GetResultString(Result, "current-thread-id");
+    struct gdbwire_mi_result *Threads = GetResultList(Result, "threads");
 
-    // IMPORTANT TODO(nox): Finish this, I think I want to use an X-MACRO in here, to
-    // refer to the variables after
-    char *Variables[] = {"id", "target_id", "name", "state", "core"};
+#define ThreadVariablesWriter(W) W(Id, id),     \
+        W(TargetId, target-id),                 \
+        W(Name, name),                          \
+        W(State, state),                        \
+        W(Core, core)
+    enum { ThreadVariablesWriter(WriteVariableKey) };
+    char *ThreadVariables[] = { ThreadVariablesWriter(WriteVariableName) };
 
-    for(struct gdbwire_mi_result *Iterator = Threads;
-        Iterator && Iterator->kind == GDBWIRE_MI_TUPLE;
-        Iterator = Iterator->next)
+#define FrameVariablesWriter(W) W(Level, level),    \
+        W(Address, addr),                           \
+        W(Function, func),                          \
+        W(File, fullname),                          \
+        W(Line, line)
+    enum { FrameVariablesWriter(WriteVariableKey) };
+    char *FrameVariables[] = { FrameVariablesWriter(WriteVariableName) };
+
+    for(struct gdbwire_mi_result *Thread = Threads;
+        Thread && Thread->kind == GDBWIRE_MI_TUPLE;
+        Thread = Thread->next)
     {
-        char *Values[ArrayCount(Variables)] = {};
-        GetBatchResultString(Iterator, Variables, Values, ArrayCount(Variables));
+        struct gdbwire_mi_result *ThreadContents = Thread->variant.result;
+        char *ThreadValues[ArrayCount(ThreadVariables)] = {};
+        char *FrameValues[ArrayCount(FrameVariables)] = {};
+        emacs_value Arguments[ArrayCount(ThreadValues) + ArrayCount(FrameValues)];
 
+        GetBatchResultString(ThreadContents, ThreadVariables, ThreadValues,
+                             ArrayCount(ThreadVariables));
+
+        if(strcmp("stopped", ThreadValues[Variable_State]) == 0)
+        {
+            struct gdbwire_mi_result *Frame = GetResultTuple(ThreadContents, "frame");
+            GetBatchResultString(Frame, FrameVariables, FrameValues, ArrayCount(FrameVariables));
+        }
+
+        for(int ThreadValueIndex = 0;
+            ThreadValueIndex < ArrayCount(ThreadVariables);
+            ++ThreadValueIndex)
+        {
+            Arguments[ThreadValueIndex] = GetEmacsString(Environment,
+                                                         ThreadValues[ThreadValueIndex]);
+        }
+        for(int FrameValueIndex = 0;
+            FrameValueIndex < ArrayCount(FrameVariables);
+            ++FrameValueIndex)
+        {
+            Arguments[ArrayCount(ThreadVariables) + FrameValueIndex] =
+                GetEmacsString(Environment, FrameValues[FrameValueIndex]);
+        }
+
+        emacs_value UpdateThreadFunction = Environment->intern(Environment, "gdb--update-thread");
+        Environment->funcall(Environment, UpdateThreadFunction, ArrayCount(Arguments), Arguments);
     }
 }
 
 internal void
 BreakpointChange(emacs_env *Environment, struct gdbwire_mi_result *Breakpoint)
 {
-    char *Variables[] = {"number", "type", "disp", "enabled", "addr", "func", "fullname", "line",
-                         "at", "pending", "thread", "cond", "times", "what"};
+#define BreakpointVariablesWriter(W) W(Number, number), \
+        W(Type, type),                                  \
+        W(Disposition, disp),                           \
+        W(Enabled, enabled),                            \
+        W(Address, addr),                               \
+        W(Function, func),                              \
+        W(File, fullname),                              \
+        W(Line, line),                                  \
+        W(At, at),                                      \
+        W(Pending, pending),                            \
+        W(Thread, thread),                              \
+        W(Condition, cond),                             \
+        W(Times, times),                                \
+        W(What, what)
+    enum { BreakpointVariablesWriter(WriteVariableKey) };
+    char *BreakpointVariables[] = { BreakpointVariablesWriter(WriteVariableName) };
 
-    char *Values[ArrayCount(Variables)] = {};
-    GetBatchResultString(Breakpoint, Variables, Values, ArrayCount(Variables));
+    char *Values[ArrayCount(BreakpointVariables)] = {};
+    GetBatchResultString(Breakpoint, BreakpointVariables, Values, ArrayCount(BreakpointVariables));
 
-    emacs_value Arguments[ArrayCount(Variables)];
+    emacs_value Arguments[ArrayCount(BreakpointVariables)];
     for(int Index = 0;
-        Index < ArrayCount(Variables);
+        Index < ArrayCount(BreakpointVariables);
         ++Index)
     {
         Arguments[Index] = GetEmacsString(Environment, Values[Index]);
