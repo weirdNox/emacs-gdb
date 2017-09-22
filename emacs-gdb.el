@@ -231,7 +231,6 @@ Possible values are:
      (with-current-buffer gdb--comint-buffer
        ,@body)))
 
-;; TODO(nox): Add support for running in selected thread/frame
 (defun gdb--command (command &optional context)
   "Execute GDB COMMAND.
 If provided, the CONTEXT is assigned to a unique token, which
@@ -247,6 +246,29 @@ and used to know what the context of that output was."
          (push `(,token-string . ,context) gdb--token-contexts)
          (setq gdb--next-token (1+ gdb--next-token))))
       (comint-simple-send process command))))
+
+(defun gdb--local--command (command &optional context thread frame)
+  "Execute GDB COMMAND in a specific THREAD and FRAME.
+That means it will use the arguments, if provided. If not, it
+will try to infer a thread and frame from the current buffer, for
+example, the thread under point in the threads buffer. If the
+point has no contextual thread, it will use the
+`gdb--selected-thread' and `gdb--selected-frame', when set.
+
+See `gdb--command' for the meaning of CONTEXT."
+  (when (not thread)
+    (cond ((eq gdb--buffer-type 'gdb--threads)
+           (setq thread (get-text-property (point) 'gdb--thread-id)))
+          ((eq gdb--buffer-type 'gdb--frames) ;; TODO(nox): Do this when frames is done
+           )
+          ((eq gdb--buffer-type 'gdb--disassembly) ;; TODO(nox): Do this when disassembly is done
+           )
+          (t (setq thread (gdb--local gdb--current-thread)
+                   frame (gdb--local gdb--current-frame)))))
+  (gdb--command (concat command
+                        (and thread (concat " --thread " thread))
+                        (and frame (concat " --frame " frame)))
+                context))
 
 ;; NOTE(nox): Inferior I/O buffer
 (defun gdb--inferior-io-init ()
@@ -508,7 +530,15 @@ buffer."
       (beginning-of-line)
       (1+ (count-lines 1 (point))))))
 
-(defun gdb--current-location ()
+(defun gdb--point-location ()
+  "Return a GDB-readable location of the point, in a source file
+or in a special GDB buffer (eg. disassembly buffer)."
+  (cond ((eq gdb--buffer-type 'gdb--disassembly) ;; TODO(nox): Do this when disassembly is done
+         )
+        ((buffer-file-name)
+         (concat (buffer-file-name) ":" (int-to-string (gdb--current-line))))))
+
+(defun gdb--infer-thread-and-frame ()
   "Return a GDB-readable location of the point, in a source file
 or in a special GDB buffer (eg. disassembly buffer)."
   (cond ((eq gdb--buffer-type 'gdb--disassembly) ;; TODO(nox): Do this when disassembly is done
@@ -692,13 +722,12 @@ calling `gdb--table-string'."
 (defun gdb-break (arg)
   "TODO"
   (interactive "P")
-  (let ((location (gdb--current-location))
+  (let ((location (gdb--point-location))
         (type "")
         (thread "")
         (condition "")
         command)
-    (when (not location) (setq arg '(4)))
-    (when arg
+    (when (or arg (not location))
       (setq type (cdr
                   (assoc
                    (completing-read "Type of breakpoint: " gdb--available-breakpoint-types nil
