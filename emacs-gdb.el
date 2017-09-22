@@ -263,7 +263,7 @@ and used to know what the context of that output was."
 
 (defun gdb--inferior-io-killed ()
   (with-current-buffer gdb--comint-buffer (comint-interrupt-subjob))
-  (gdb--command "-interpreter-exec console kill" 'gdb--context-ignore))
+  (gdb--command "-exec-abort" 'gdb--context-ignore))
 
 ;; NOTE(nox): When the debuggee exits, Emacs gets an EIO error and stops listening to the
 ;; tty. This re-inits the buffer so everything works fine!
@@ -346,9 +346,13 @@ and used to know what the context of that output was."
              (target-id (gdb--thread-target-id thread))
              (name (gdb--thread-name thread))
              (state (gdb--thread-state thread))
+             (state-display
+              (if (string= state "running")
+                  (eval-when-compile (propertize "running" 'font-lock-face font-lock-string-face))
+                (eval-when-compile (propertize "stopped" 'font-lock-face font-lock-warning-face))))
              (core (gdb--thread-core thread))
              (frame (gdb--threads-frame-string (gdb--thread-frame thread))))
-        (gdb--table-add-row table (list id target-id name state core frame)
+        (gdb--table-add-row table (list id target-id name state-display core frame)
                             `(gdb--thread-id ,id))))
     (erase-buffer)
     (insert (gdb--table-string table " "))))
@@ -357,9 +361,10 @@ and used to know what the context of that output was."
   (if frame
     (let ((addr (gdb--frame-addr frame))
           (func (gdb--frame-func frame))
-          (file (file-name-nondirectory (gdb--frame-file frame)))
+          (file (gdb--frame-file frame))
           (line (gdb--frame-line frame))
           (from (gdb--frame-from frame)))
+      (when file (setq file (file-name-nondirectory file)))
       (concat
        "in " (propertize (or func "unknown") 'font-lock-face font-lock-function-name-face)
        " at " addr
@@ -534,13 +539,15 @@ or in a special GDB buffer (eg. disassembly buffer)."
           (setq result (1+ result)))
         0))))
 
-(defun gdb--done ()
+(defun gdb--done () ;; TODO(nox): Stub
   )
 
 (defun gdb--error () ;; TODO(nox): Stub
   )
 
-(defun gdb--running () ;; TODO(nox): Stub
+(defun gdb--running (thread-id)
+  (gdb--get-thread-info thread-id)
+  ;; TODO(nox): Handle selected thread
   )
 
 (defun gdb--stopped () ;; TODO(nox): Stub
@@ -586,7 +593,16 @@ or in a special GDB buffer (eg. disassembly buffer)."
    (setq gdb--breakpoints (assq-delete-all number gdb--breakpoints))
    (add-to-list 'gdb--buffers-to-update 'gdb--breakpoints)))
 
-(defun gdb--thread-updated (id target-id name state core addr func file line from)
+(defun gdb--get-thread-info (&optional id)
+   (gdb--command (concat "-thread-info " id) 'gdb--context-thread-info))
+
+(defun gdb--thread-exited (id)
+  (gdb--local
+   (setq id (string-to-int id))
+   (setq gdb--threads (assq-delete-all id gdb--threads))
+   (add-to-list 'gdb--buffers-to-update 'gdb--threads)))
+
+(defun gdb--update-thread (id target-id name state core addr func file line from)
   (gdb--local
    (let* ((id (string-to-int id))
           (thread
@@ -608,10 +624,6 @@ or in a special GDB buffer (eg. disassembly buffer)."
          (setf (alist-get id gdb--threads) thread)
        (add-to-list 'gdb--threads `(,id . ,thread) t))
      (add-to-list 'gdb--buffers-to-update 'gdb--threads))))
-
-(defun gdb--thread-exited (id)
-  )
-
 
 ;; ----------------------------------------------------------------------
 ;; NOTE(nox): Everything enclosed in here was adapted from gdb-mi.el

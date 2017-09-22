@@ -180,6 +180,21 @@ GetEmacsString_(emacs_env *Environment, char *String, bool EmptyIfNull)
 #define GetEmacsString(Environment, String) GetEmacsString_(Environment, String, false)
 #define GetEmacsStringEmpty(Environment, String) GetEmacsString_(Environment, String, true)
 
+internal inline emacs_value
+Intern(emacs_env *Environment, char *Symbol)
+{
+    emacs_value Result = Environment->intern(Environment, Symbol);
+    return Result;
+}
+
+internal inline emacs_value
+Funcall(emacs_env *Environment, char *Function, u32 NumArguments, emacs_value *Arguments)
+{
+    emacs_value Result = Environment->funcall(Environment, Intern(Environment, Function),
+                                              NumArguments, Arguments);
+    return Result;
+}
+
 internal void
 BreakpointChange(emacs_env *Environment, struct gdbwire_mi_result *Breakpoint)
 {
@@ -210,16 +225,14 @@ BreakpointChange(emacs_env *Environment, struct gdbwire_mi_result *Breakpoint)
     {
         Arguments[Index] = GetEmacsString(Environment, Values[Index]);
     }
-    emacs_value BreakpointChangedFunc = Environment->intern(Environment, "gdb--breakpoint-changed");
-    Environment->funcall(Environment, BreakpointChangedFunc, ArrayCount(Arguments), Arguments);
+    Funcall(Environment, "gdb--breakpoint-changed", ArrayCount(Arguments), Arguments);
 }
 
 internal void
 BreakpointDeletion(emacs_env *Environment, char *Id)
 {
     emacs_value Argument = GetEmacsString(Environment, Id);
-    emacs_value BreakpointDeletedFunc = Environment->intern(Environment, "gdb--breakpoint-deleted");
-    Environment->funcall(Environment, BreakpointDeletedFunc, 1, &Argument);
+    Funcall(Environment, "gdb--breakpoint-deleted", 1, &Argument);
 }
 
 internal void
@@ -277,8 +290,7 @@ ThreadInfo(emacs_env *Environment, struct gdbwire_mi_result *Result)
                 GetEmacsString(Environment, FrameValues[FrameValueIndex]);
         }
 
-        emacs_value UpdateThreadFunction = Environment->intern(Environment, "gdb--thread-updated");
-        Environment->funcall(Environment, UpdateThreadFunction, ArrayCount(Arguments), Arguments);
+        Funcall(Environment, "gdb--update-thread", ArrayCount(Arguments), Arguments);
     }
 }
 
@@ -300,11 +312,36 @@ HandleMiOobRecord(emacs_env *Environment, struct gdbwire_mi_oob_record *Record,
                     {
                         case GDBWIRE_MI_ASYNC_STOPPED:
                         {
+                            for(struct gdbwire_mi_result *Iterator = Result;
+                                Iterator;
+                                Iterator = Iterator->next)
+                            {
+                                if(Iterator->variable &&
+                                   strcmp(Iterator->variable, "stopped-threads") == 0)
+                                {
+                                    char *ThreadInfoFunc = "gdb--get-thread-info";
+                                    if(Iterator->kind == GDBWIRE_MI_CSTRING)
+                                    {
+                                        Funcall(Environment, ThreadInfoFunc, 0, 0);
+                                    }
+                                    else
+                                    {
+                                        for(struct gdbwire_mi_result *Thread = Iterator->variant.result;
+                                            Thread;
+                                            Thread = Thread->next)
+                                        {
+                                            emacs_value Argument =
+                                                GetEmacsString(Environment, Thread->variant.cstring);
+                                            Funcall(Environment, ThreadInfoFunc, 1, &Argument);
+                                        }
+                                    }
+
+                                    break;
+                                }
+                            }
                             // TODO(nox): This will eventually receive more parameters, to
                             // update the current frame and thread and etc
-                            Environment->funcall(Environment,
-                                                 Environment->intern(Environment, "gdb--stopped"),
-                                                 0, 0);
+                            Funcall(Environment, "gdb--stopped", 0, 0);
 
                             // NOTE(nox): *stopped does not end with a prompt...
                             PushString(PrintString, "(gdb) ");
@@ -312,9 +349,9 @@ HandleMiOobRecord(emacs_env *Environment, struct gdbwire_mi_oob_record *Record,
 
                         case GDBWIRE_MI_ASYNC_RUNNING:
                         {
-                            Environment->funcall(Environment,
-                                                 Environment->intern(Environment, "gdb--running"),
-                                                 0, 0);
+                            emacs_value Argument = GetEmacsString(Environment,
+                                                                  GetResultString(Result, "thread-id"));
+                            Funcall(Environment, "gdb--running", 1, &Argument);
                         } break;
 
                         IgnoreDefaultCase;
@@ -328,30 +365,27 @@ HandleMiOobRecord(emacs_env *Environment, struct gdbwire_mi_oob_record *Record,
                         // TODO(nox): Check if we need more handlers
                         case GDBWIRE_MI_ASYNC_THREAD_CREATED:
                         {
-                            // NOTE(nox): This notification doesn't provide enough information
-                            emacs_value GdbCommandFunc = Environment->intern(Environment,
-                                                                             "gdb--command");
-                            emacs_value Arguments[2];
-                            Arguments[0] = GetEmacsString(Environment, "-thread-info");
-                            Arguments[1] = Environment->intern(Environment,
-                                                               "gdb--context-thread-info");
-                            Environment->funcall(Environment, GdbCommandFunc, 2, Arguments);
+                            char *ThreadId = GetResultString(Result, "id");
+                            emacs_value Argument = GetEmacsString(Environment, ThreadId);
+                            Funcall(Environment, "gdb--get-thread-info", 1, &Argument);
                         } break;
 
                         case GDBWIRE_MI_ASYNC_THREAD_EXITED:
                         {
-                            // TODO(nox): Remove and update UI
+                            char *ThreadId = GetResultString(Result, "id");
+                            emacs_value Argument = GetEmacsString(Environment, ThreadId);
+                            Funcall(Environment, "gdb--thread-exited", 1, &Argument);
                         } break;
 
                         case GDBWIRE_MI_ASYNC_BREAKPOINT_CREATED:
                         case GDBWIRE_MI_ASYNC_BREAKPOINT_MODIFIED:
                         {
-                            BreakpointChange(Environment, Result->variant.result);
+                            BreakpointChange(Environment, GetResultTuple(Result, "bkpt"));
                         } break;
 
                         case GDBWIRE_MI_ASYNC_BREAKPOINT_DELETED:
                         {
-                            BreakpointDeletion(Environment, Result->variant.cstring);
+                            BreakpointDeletion(Environment, GetResultString(Result, "id"));
                         } break;
 
                         IgnoreDefaultCase;
@@ -403,9 +437,7 @@ GetTokenContext(emacs_env *Environment, char *TokenString)
     if(TokenString)
     {
         emacs_value Argument = GetEmacsString(Environment, TokenString);
-        emacs_value ContextExtractor = Environment->intern(Environment, "gdb--extract-context");
-        emacs_value Context = Environment->funcall(Environment, ContextExtractor,
-                                                   1, &Argument);
+        emacs_value Context = Funcall(Environment, "gdb--extract-context", 1, &Argument);
         Result = Environment->extract_integer(Environment, Context);
         assert(Result < Context_Size);
     }
@@ -436,9 +468,7 @@ HandleMiResultRecord(emacs_env *Environment, struct gdbwire_mi_result_record *Re
                         emacs_value Arguments[2];
                         Arguments[0] = GetEmacsString(Environment, File);
                         Arguments[1] = GetEmacsStringEmpty(Environment, Line);
-                        emacs_value InitialFileFunc = Environment->intern(Environment,
-                                                                          "gdb--set-initial-file");
-                        Environment->funcall(Environment, InitialFileFunc, 2, Arguments);
+                        Funcall(Environment, "gdb--set-initial-file", 2, Arguments);
                     }
                 } break;
 
@@ -455,7 +485,7 @@ HandleMiResultRecord(emacs_env *Environment, struct gdbwire_mi_result_record *Re
                 IgnoreDefaultCase;
             }
 
-            Environment->funcall(Environment, Environment->intern(Environment, "gdb--done"), 0, 0);
+            Funcall(Environment, "gdb--done", 0, 0);
         } break;
 
         case GDBWIRE_MI_ERROR:
@@ -476,9 +506,7 @@ HandleMiResultRecord(emacs_env *Environment, struct gdbwire_mi_result_record *Re
                 } break;
             }
 
-            Environment->funcall(Environment,
-                                 Environment->intern(Environment, "gdb--error"),
-                                 0, 0);
+            Funcall(Environment, "gdb--error", 0, 0);
         } break;
 
         case GDBWIRE_MI_EXIT:
@@ -500,8 +528,8 @@ HandleMiResultRecord(emacs_env *Environment, struct gdbwire_mi_result_record *Re
 
 // NOTE(weirdNox): Because this is an internal helper function, we will assume that
 // everything passed in is valid.
-#define PARSE_GDB_MI_OUTPUT_NAME "gdb--handle-mi-output"
-#define PARSE_GDB_MI_OUTPUT_DOC "(" PARSE_GDB_MI_OUTPUT_NAME " output)" \
+#define HANDLE_GDB_MI_OUTPUT_NAME "gdb--handle-mi-output"
+#define HANDLE_GDB_MI_OUTPUT_DOC "(" HANDLE_GDB_MI_OUTPUT_NAME " output)" \
     "\nHandle GDB/MI output and return string to print."
 internal emacs_value
 HandleGdbMiOutput(emacs_env *Environment, ptrdiff_t NumberOfArguments,
@@ -561,20 +589,18 @@ s32 emacs_module_init(struct emacs_runtime *EmacsRuntime)
 {
     emacs_env *Environment = EmacsRuntime->get_environment(EmacsRuntime);
 
-    emacs_value FSet = Environment->intern(Environment, "fset");
     emacs_value Arguments[2];
-    Arguments[0] = Environment->intern(Environment, PARSE_GDB_MI_OUTPUT_NAME);
+    Arguments[0] = Intern(Environment, HANDLE_GDB_MI_OUTPUT_NAME);
     Arguments[1] = Environment->make_function(Environment, 1, 1, HandleGdbMiOutput,
-                                              PARSE_GDB_MI_OUTPUT_DOC, 0);
-    Environment->funcall(Environment, FSet, 2, Arguments);
+                                              HANDLE_GDB_MI_OUTPUT_DOC, 0);
+    Funcall(Environment, "fset", 2, Arguments);
 
     struct gdbwire_mi_parser_callbacks Callbacks = {0, GdbWireCallback};
     GdbMiParser = gdbwire_mi_parser_create(Callbacks);
 
-    Nil = Environment->intern(Environment, "nil");
+    Nil = Intern(Environment, "nil");
 
-    emacs_value Provide = Environment->intern(Environment, "provide");
-    emacs_value Feature = Environment->intern(Environment, "emacs-gdb-module");
-    Environment->funcall(Environment, Provide, 1, &Feature);
+    emacs_value Feature = Intern(Environment, "emacs-gdb-module");
+    Funcall(Environment, "provide", 1, &Feature);
     return 0;
 }
