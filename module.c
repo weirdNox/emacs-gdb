@@ -339,9 +339,10 @@ HandleMiOobRecord(emacs_env *Environment, struct gdbwire_mi_oob_record *Record,
                                     break;
                                 }
                             }
-                            // TODO(nox): This will eventually receive more parameters, to
-                            // update the current frame and thread and etc
-                            Funcall(Environment, "gdb--stopped", 0, 0);
+
+                            char *ThreadId = GetResultString(Result, "thread-id");
+                            emacs_value Argument = GetEmacsString(Environment, ThreadId);
+                            Funcall(Environment, "gdb--stopped", 1, &Argument);
 
                             // NOTE(nox): *stopped does not end with a prompt...
                             PushString(PrintString, "(gdb) ");

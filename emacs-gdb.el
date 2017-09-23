@@ -48,11 +48,11 @@
 (defvar-local gdb--source-window nil
   "Window where GDB shows its source files.")
 
-(defvar-local gdb--current-thread nil
-  "Number of the selected thread.")
+(defvar-local gdb--main-thread nil
+  "Number of the main selected thread.")
 
-(defvar-local gdb--current-frame nil
-  "Number of the selected thread frame.")
+(defvar-local gdb--main-frame nil
+  "Number of the main selected thread frame.")
 
 (defvar-local gdb--selected-file ""
   "Name of the selected file for the main selected thread.")
@@ -237,23 +237,24 @@ If provided, the CONTEXT is assigned to a unique token, which
 will be received, alongside the output, by the dynamic module,
 and used to know what the context of that output was."
   (let* ((process (gdb--get-comint-process))
-         (token (gdb--local gdb--next-token))
-         (token-string (int-to-string token)))
+         token)
     (when process
       (when (memq context gdb--available-contexts)
-        (setq command (concat token-string command))
         (gdb--local
-         (push `(,token-string . ,context) gdb--token-contexts)
-         (setq gdb--next-token (1+ gdb--next-token))))
-      (comint-simple-send process command))))
+         (setq token (int-to-string gdb--next-token)
+               command (concat token command)
+               gdb--next-token (1+ gdb--next-token))
+         (push `(,token . ,context) gdb--token-contexts)))
+      (comint-simple-send process command)
+      token)))
 
-(defun gdb--local--command (command &optional context thread frame)
+(defun gdb--local-command (command &optional context thread frame)
   "Execute GDB COMMAND in a specific THREAD and FRAME.
 That means it will use the arguments, if provided. If not, it
 will try to infer a thread and frame from the current buffer, for
 example, the thread under point in the threads buffer. If the
 point has no contextual thread, it will use the
-`gdb--selected-thread' and `gdb--selected-frame', when set.
+`gdb--main-thread' and `gdb--main-frame', when set.
 
 See `gdb--command' for the meaning of CONTEXT."
   (when (not thread)
@@ -263,8 +264,8 @@ See `gdb--command' for the meaning of CONTEXT."
            )
           ((eq gdb--buffer-type 'gdb--disassembly) ;; TODO(nox): Do this when disassembly is done
            )
-          (t (setq thread (gdb--local gdb--current-thread)
-                   frame (gdb--local gdb--current-frame)))))
+          (t (setq thread (gdb--local gdb--main-thread)
+                   frame (gdb--local gdb--main-frame)))))
   (gdb--command (concat command
                         (and thread (concat " --thread " thread))
                         (and frame (concat " --frame " frame)))
@@ -323,30 +324,30 @@ See `gdb--command' for the meaning of CONTEXT."
              (line (gdb--breakpoint-line breakpoint)))
         (gdb--table-add-row table (list number type disp enabled-display addr hits what)
                             `(gdb--breakpoint-number ,number))
-        (when (and file line (file-readable-p file))
-          (gdb--place-breakpoint-symbol (find-file-noselect file t) line t number enabled)))
+        (gdb--place-breakpoint-symbol (gdb--find-file file) line t number enabled))
       ;; TODO(nox): Place on disassembly buffers
       )
     (erase-buffer)
     (insert (gdb--table-string table " "))))
 
 (defun gdb--place-breakpoint-symbol (buffer line is-source-buffer breakpoint-number enabled)
-  (with-current-buffer buffer
-    (let* ((pos (line-beginning-position (1+ (- (string-to-int line) (line-number-at-pos)))))
-           (overlay (make-overlay pos pos buffer))
-           (dummy-string "x")
-           property)
-      (if (display-images-p)
-          (setq property `(left-fringe gdb--breakpoint ,(if enabled
-                                                            'gdb--breakpoint-enabled
-                                                          'gdb--breakpoint-disabled)))
-        (setq property `((margin left-margin) ,(if enabled "B" "b"))))
-      (put-text-property 0 1 'display property dummy-string)
-      (when is-source-buffer
-        (overlay-put overlay 'window (gdb--local gdb--source-window)))
-      (overlay-put overlay 'gdb--breakpoint t)
-      (overlay-put overlay 'gdb--breakpoint-number breakpoint-number)
-      (overlay-put overlay 'before-string dummy-string))))
+  (when (and buffer line)
+    (with-current-buffer buffer
+      (let* ((pos (line-beginning-position (1+ (- (string-to-int line) (line-number-at-pos)))))
+             (overlay (make-overlay pos pos buffer))
+             (dummy-string "x")
+             property)
+        (if (display-images-p)
+            (setq property `(left-fringe gdb--breakpoint ,(if enabled
+                                                              'gdb--breakpoint-enabled
+                                                            'gdb--breakpoint-disabled)))
+          (setq property `((margin left-margin) ,(if enabled "B" "b"))))
+        (put-text-property 0 1 'display property dummy-string)
+        (when is-source-buffer
+          (overlay-put overlay 'window (gdb--local gdb--source-window)))
+        (overlay-put overlay 'gdb--breakpoint t)
+        (overlay-put overlay 'gdb--breakpoint-number breakpoint-number)
+        (overlay-put overlay 'before-string dummy-string)))))
 
 (defun gdb--remove-all-breakpoint-symbols ()
   (dolist (buffer (buffer-list))
@@ -477,8 +478,7 @@ BUFFER-TYPE must be a member of `gdb--buffer-types'."
 (defun gdb--find-file (path)
   "Return the buffer of the file specified by PATH.
 Create the buffer, if it wasn't already open."
-  (when (and (file-exists-p path)
-             (file-readable-p path))
+  (when (and path (not (file-directory-p path)) (file-readable-p path))
     (with-current-buffer (find-file-noselect path)
       (setq gdb--source-buffer t)
       (current-buffer))))
@@ -514,7 +514,7 @@ Create the buffer, if it wasn't already open."
          (bottom-right (split-window bottom-left nil t)))
     (balance-windows)
     (gdb--set-window-buffer top-left (gdb--get-buffer-create 'gdb--comint))
-    (gdb--set-window-buffer top-right (gdb--get-buffer-create 'gdb--locals))
+    (gdb--set-window-buffer top-right (gdb--get-buffer-create 'gdb--frames))
     (gdb--set-window-buffer middle-right (gdb--get-buffer-create 'gdb--inferior-io))
     (gdb--set-window-buffer bottom-left (gdb--get-buffer-create 'gdb--threads))
     (gdb--set-window-buffer bottom-right (gdb--get-buffer-create 'gdb--breakpoints))
@@ -531,14 +531,6 @@ buffer."
       (1+ (count-lines 1 (point))))))
 
 (defun gdb--point-location ()
-  "Return a GDB-readable location of the point, in a source file
-or in a special GDB buffer (eg. disassembly buffer)."
-  (cond ((eq gdb--buffer-type 'gdb--disassembly) ;; TODO(nox): Do this when disassembly is done
-         )
-        ((buffer-file-name)
-         (concat (buffer-file-name) ":" (int-to-string (gdb--current-line))))))
-
-(defun gdb--infer-thread-and-frame ()
   "Return a GDB-readable location of the point, in a source file
 or in a special GDB buffer (eg. disassembly buffer)."
   (cond ((eq gdb--buffer-type 'gdb--disassembly) ;; TODO(nox): Do this when disassembly is done
@@ -569,19 +561,24 @@ or in a special GDB buffer (eg. disassembly buffer)."
           (setq result (1+ result)))
         0))))
 
-(defun gdb--done () ;; TODO(nox): Stub
-  )
+(defun gdb--done ())
 
-(defun gdb--error () ;; TODO(nox): Stub
-  )
+(defun gdb--error ())
 
 (defun gdb--running (thread-id)
   (gdb--get-thread-info thread-id)
   ;; TODO(nox): Handle selected thread
   )
 
-(defun gdb--stopped () ;; TODO(nox): Stub
-  )
+(defun gdb--stopped (thread-id)
+  (gdb--local
+   (when (or (not gdb--main-thread)
+             (not (string= "stopped"
+                           (gdb--thread-state (alist-get
+                                               gdb--main-thread
+                                               gdb--threads)))))
+     (message "Switched to thread %s." thread-id)
+     (setq gdb--main-thread (int-to-string thread-id)))))
 
 (defun gdb--set-initial-file (file line-string)
   (gdb--local (setq gdb--selected-file (gdb--complete-path file)
@@ -608,7 +605,7 @@ or in a special GDB buffer (eg. disassembly buffer)."
                                                                  ":"
                                                                  line))))
                           (and cond (concat " if " cond))
-                          (and thread (concat " on " thread)))
+                          (and thread (concat " on thread " thread)))
             :file fullname
             :line line))
           (existing (assq number gdb--breakpoints)))
@@ -627,6 +624,7 @@ or in a special GDB buffer (eg. disassembly buffer)."
    (gdb--command (concat "-thread-info " id) 'gdb--context-thread-info))
 
 (defun gdb--thread-exited (id)
+  ;; TODO(nox): Handle selected thread
   (gdb--local
    (setq id (string-to-int id))
    (setq gdb--threads (assq-delete-all id gdb--threads))
@@ -650,6 +648,8 @@ or in a special GDB buffer (eg. disassembly buffer)."
                   :line line
                   :from from))))
           (existing (assq id gdb--threads)))
+     (when (not gdb--main-thread)
+       (setq gdb--main-thread id))
      (if existing
          (setf (alist-get id gdb--threads) thread)
        (add-to-list 'gdb--threads `(,id . ,thread) t))
@@ -719,6 +719,48 @@ calling `gdb--table-string'."
 ;; ----------------------------------------------------------------------
 
 ;; NOTE(nox): User commands
+;; TODO(nox): Implement reverse debugging
+;; TODO(nox): Should we use a toggle like "Instruction mode" where, if set, `gdb-next'
+;; works instruction-wise or have a separate command `gdb-nexti'?
+;; TODO(nox): Need to think carefully about `-exec-return', this _does not_ execute the
+;; inferior, so there's no *stopped notif. Issue a `-stack-list-frames' for every stopped
+;; thread after doing this? Maybe...
+(defun gdb-run (arg)
+  "Start execution of the inferior from the beginning.
+If ARG is non-nil, stop at the start of the inferior's main subprogram."
+  (interactive "P")
+  (gdb--command "-exec-run" (and arg " --start")))
+
+(defun gdb-continue (arg)
+  "TODO"
+  (interactive "P")
+  (if arg
+      (gdb--command "-exec-continue --all")
+    (gdb--local-command "-exec-continue")))
+
+(defun gdb-interrupt (arg)
+  "Interrupt inferred tread, unless ARG is non-nil, in which case
+it will interrupt all threads."
+  (interactive "P")
+  (if arg
+      (gdb--command "-exec-interrupt --all")
+    (gdb--local-command "-exec-interrupt")))
+
+(defun gdb-next ()
+  "TODO"
+  (interactive)
+  (gdb--local-command "-exec-next"))
+
+(defun gdb-step ()
+  "TODO"
+  (interactive)
+  (gdb--local-command "-exec-step"))
+
+(defun gdb-finish ()
+  "TODO"
+  (interactive)
+  (gdb--local-command "-exec-finish"))
+
 (defun gdb-break (arg)
   "TODO"
   (interactive "P")
@@ -734,7 +776,16 @@ calling `gdb--table-string'."
                                     t nil nil "Breakpoint")
                    gdb--available-breakpoint-types)))
       (setq location (read-from-minibuffer "Location: " location))
-      ;; TODO(nox): Be able to select a thread from here
+      (let ((threads (gdb--local gdb--threads))
+            thread-alist)
+        (push '("All" . nil) thread-alist)
+        (dolist (thread threads (setq thread-alist (nreverse thread-alist)))
+          (let* ((thread-id (int-to-string (car thread)))
+                 (thread-obj (cdr thread))
+                 (target-id (gdb--thread-target-id thread-obj)))
+            (push (cons (concat thread-id ": " target-id) thread-id) thread-alist)))
+        (setq thread (cdr (assoc (completing-read "Thread: " thread-alist nil t nil nil "All")
+                                 thread-alist))))
       (setq condition (read-from-minibuffer "Condition: ")))
     (gdb--command (concat "-break-insert -f " type
                           (and (> (length condition) 0) (concat " -c " (gdb--escape-argument
