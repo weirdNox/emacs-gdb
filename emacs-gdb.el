@@ -142,7 +142,7 @@ ID is an integer and thread is a `gdb--thread'.")
 (defvar-local gdb--source-buffer nil
   "Specifies whether or not this buffer is a source file buffer.")
 
-(defvar-local gdb--thread-number nil
+(defvar-local gdb--thread-id nil
   "Number of the thread associated with the current GDB buffer.
 The main selected thread is set on the GDB comint buffer.")
 
@@ -269,7 +269,7 @@ That means it will use the arguments, if provided. If not, it
 will try to infer a thread and frame from the current buffer, for
 example, the thread under point in the threads buffer. If the
 point has no contextual thread, it will use the
-`gdb--thread-number' when set in the comint buffer.
+`gdb--thread-id' when set in the comint buffer.
 
 See `gdb--command' for the meaning of CONTEXT."
   (when (not thread)
@@ -277,15 +277,15 @@ See `gdb--command' for the meaning of CONTEXT."
            (setq thread (get-text-property (point) 'gdb--thread-id))
            (when thread (setq thread (int-to-string thread))))
           ((eq gdb--buffer-type 'gdb--frames)
-           (setq thread (or gdb--thread-number (gdb--local gdb--thread-number)))
+           (setq thread (or gdb--thread-id (gdb--local gdb--thread-id)))
            (setq frame (get-text-property (point) 'gdb--frame-level))
            (when thread
              (setq thread (int-to-string thread))
              (when frame (setq frame (int-to-string frame)))))
           ((eq gdb--buffer-type 'gdb--disassembly) ;; TODO(nox): Do this when disassembly is done
            )
-          (t (setq thread (gdb--local (and gdb--thread-number
-                                           (int-to-string gdb--thread-number)))))))
+          (t (setq thread (gdb--local (and gdb--thread-id
+                                           (int-to-string gdb--thread-id)))))))
   (gdb--command (concat command
                         (and thread (concat " --thread " thread))
                         (and thread frame (concat " --frame " frame)))
@@ -365,7 +365,7 @@ See `gdb--command' for the meaning of CONTEXT."
   (let ((threads (gdb--local gdb--threads))
         (table (make-gdb--table))
         (count 1)
-        (current-thread (gdb--local gdb--thread-number))
+        (current-thread (gdb--local gdb--thread-id))
         current-thread-line)
     (gdb--table-add-row table '("ID" "TgtID" "Name" "State" "Core" "Frame"))
     (dolist (thread-cons threads)
@@ -416,7 +416,7 @@ See `gdb--command' for the meaning of CONTEXT."
   (gdb--init-buffer "Stack frames"))
 
 (defun gdb--frames-update ()
-  (let* ((thread-id (or gdb--thread-number (gdb--local gdb--thread-number)))
+  (let* ((thread-id (or gdb--thread-id (gdb--local gdb--thread-id)))
          (thread (when thread-id (gdb--local (alist-get thread-id gdb--threads))))
          (frames (when thread (gdb--thread-frames thread)))
          (table (make-gdb--table)))
@@ -442,13 +442,13 @@ See `gdb--command' for the meaning of CONTEXT."
       (insert (gdb--table-string table " "))
       (gdb--scroll-buffer-to-line (current-buffer) line))
     (remove-overlays nil nil 'gdb--frame-indicator t)
-    (when (and thread-id frames (eq thread-id (gdb--local gdb--thread-number)))
+    (when (and thread-id frames (eq thread-id (gdb--local gdb--thread-id)))
       (gdb--switch-to-frame 0))))
 
 ;; ----------------------------------------------------------------------
 ;; NOTE(nox): Disassembly buffer
 (defun gdb--disassembly-init ()
-  (gdb--init-buffer "Stack frames"))
+  (gdb--init-buffer "Disassembly"))
 
 (defun gdb--disassembly-update ()
   )
@@ -502,14 +502,14 @@ the comparison."
       (with-current-buffer buffer
         (when (and (eq gdb--buffer-type buffer-type)
                    (or (eq buffer-type 'gdb--comint)
-                       (eq gdb--thread-number thread)))
+                       (eq gdb--thread-id thread)))
           (throw 'found buffer))))))
 
 (defun gdb--get-buffer-create (buffer-type &optional thread)
   "Get GDB buffer of a specific BUFFER-TYPE and THREAD, creating it, if needed.
 
 When creating, assign `gdb--buffer-type' to BUFFER-TYPE. Also
-assign `gdb--thread-number' to THREAD, when provided.
+assign `gdb--thread-id' to THREAD, when provided.
 
 BUFFER-TYPE must be a member of `gdb--buffer-types'."
   (when (memq buffer-type gdb--buffer-types)
@@ -524,7 +524,7 @@ BUFFER-TYPE must be a member of `gdb--buffer-types'."
           (funcall init-symbol)
           (setq gdb--buffer-status t
                 gdb--buffer-type buffer-type
-                gdb--thread-number thread)))
+                gdb--thread-id thread)))
       buffer)))
 
 (defun gdb--update ()
@@ -581,11 +581,11 @@ BUFFER-TYPE must be a member of `gdb--buffer-types'."
 
 (defun gdb--switch-to-thread (thread-id &optional always)
   (gdb--local
-   (let ((selected-thread (and gdb--thread-number (alist-get gdb--thread-number gdb--threads))))
+   (let ((selected-thread (and gdb--thread-id (alist-get gdb--thread-id gdb--threads))))
      (when (or always (not selected-thread)
-               (and (not (eq thread-id gdb--thread-number))
+               (and (not (eq thread-id gdb--thread-id))
                     (not (string= "stopped" (gdb--thread-state selected-thread)))))
-       (setq gdb--thread-number thread-id)
+       (setq gdb--thread-id thread-id)
        (when thread-id
          (add-to-list 'gdb--buffers-to-update 'gdb--frames)
          (gdb--update)
@@ -601,7 +601,7 @@ BUFFER-TYPE must be a member of `gdb--buffer-types'."
          (message "Switched to thread %s." thread-id))))))
 
 (defun gdb--switch-to-frame (frame-level)
-  (let* ((thread-obj (gdb--local (alist-get gdb--thread-number gdb--threads)))
+  (let* ((thread-obj (gdb--local (alist-get gdb--thread-id gdb--threads)))
          (frame-obj (when thread-obj (alist-get frame-level (gdb--thread-frames thread-obj))))
          (file (when frame-obj (gdb--complete-path (gdb--frame-file frame-obj))))
          (line (when frame-obj (gdb--frame-line frame-obj))))
@@ -616,8 +616,8 @@ BUFFER-TYPE must be a member of `gdb--buffer-types'."
       (with-current-buffer buffer
         (when (eq gdb--buffer-type 'gdb--frames)
           (remove-overlays nil nil 'gdb--frame-indicator t)
-          (when (or (not gdb--thread-number)
-                    (eq gdb--thread-number thread-id))
+          (when (or (not gdb--thread-id)
+                    (eq gdb--thread-id thread-id))
             (gdb--place-symbol buffer (+ 2 frame-level) '((type . frame-indicator)))))))))
 
 (defun gdb--complete-path (path)
@@ -690,6 +690,20 @@ or in a special GDB buffer (eg. disassembly buffer)."
       (when (or gdb--source-buffer (and (not source-files-only) gdb--buffer-type))
         (remove-overlays nil nil type t)))))
 
+(defun gdb--ask-for-thread (&optional default-id with-all)
+  (gdb--local
+   (let (collection default-string)
+     (when with-all (push '("All" . nil) collection))
+     (dolist (thread gdb--threads (setq collection (nreverse collection)))
+       (let* ((id (car thread))
+              (obj (cdr thread))
+              (target-id (gdb--thread-target-id obj))
+              (display (concat (int-to-string id) ": " target-id)))
+         (push (cons display id) collection)
+         (when (eq id default-id) (setq default-string display))))
+     (cdr (assoc (completing-read "Thread: " collection nil t nil nil default-string)
+                 collection)))))
+
 ;; ----------------------------------------------------------------------
 ;; NOTE(nox): Functions to be called by the dynamic module
 (defun gdb--extract-context (token-string)
@@ -724,7 +738,7 @@ it from the list."
        (setf (gdb--thread-frames thread) nil)
        (add-to-list 'gdb--buffers-to-update 'gdb--threads)
        (add-to-list 'gdb--buffers-to-update 'gdb--frames)))
-   (when (eq thread-id gdb--thread-number) (gdb--remove-all-symbols 'gdb--source-indicator t))))
+   (when (eq thread-id gdb--thread-id) (gdb--remove-all-symbols 'gdb--source-indicator t))))
 
 (defun gdb--stopped (thread-id)
   (gdb--switch-to-thread (and thread-id (string-to-int thread-id))))
@@ -776,7 +790,7 @@ it from the list."
   (gdb--local
    (setq thread-id (string-to-int thread-id)
          gdb--threads (assq-delete-all thread-id gdb--threads))
-   (when (eq thread-id gdb--thread-number)
+   (when (eq thread-id gdb--thread-id)
      (gdb--switch-to-thread (car (car gdb--threads)) t))
    (add-to-list 'gdb--buffers-to-update 'gdb--threads))
   (add-to-list 'gdb--buffers-to-update 'gdb--frames))
@@ -794,7 +808,7 @@ it from the list."
      (if existing
          (setf (alist-get id gdb--threads) thread)
        (add-to-list 'gdb--threads `(,id . ,thread) t))
-     (when (not gdb--thread-number) (gdb--switch-to-thread id t))
+     (when (not gdb--thread-id) (gdb--switch-to-thread id t))
      (if (string= "stopped" state)
          (gdb--command (concat "-stack-list-frames --thread " id-str)
                        (cons 'gdb--context-frame-info id-str))
@@ -935,19 +949,11 @@ it will interrupt all threads."
     (cond ((eq gdb--buffer-type 'gdb--threads)
            (setq thread-id (get-text-property (point) 'gdb--thread-id)))
           ((eq gdb--buffer-type 'gdb--frames)
-           (setq thread-id (or gdb--thread-number (gdb--local gdb--thread-number)))
+           (setq thread-id (or gdb--thread-id (gdb--local gdb--thread-id)))
            (setq frame-level (get-text-property (point) 'gdb--frame-level))))
     (when (or arg (not thread-id))
       (let (collection default thread-obj frames)
-        (dolist (thread (gdb--local gdb--threads) (setq collection (nreverse collection)))
-          (let* ((iterator-id (car thread))
-                 (iterator-obj (cdr thread))
-                 (iterator-target-id (gdb--thread-target-id iterator-obj))
-                 (display (concat (int-to-string iterator-id) ": " iterator-target-id)))
-            (push (cons display iterator-id) collection)
-            (when (eq iterator-id thread-id) (setq default display))))
-        (setq thread-id (cdr (assoc (completing-read "Thread: " collection nil t nil nil default)
-                                    collection)))
+        (setq thread-id (gdb--ask-for-thread thread-id))
         (setq thread-obj (gdb--local (alist-get thread-id gdb--threads))
               collection nil
               default nil)
@@ -978,21 +984,12 @@ it will interrupt all threads."
                                     t nil nil "Breakpoint")
                    gdb--available-breakpoint-types)))
       (setq location (read-from-minibuffer "Location: " location))
-      (let ((threads (gdb--local gdb--threads))
-            thread-alist)
-        (push '("All" . nil) thread-alist)
-        (dolist (thread threads (setq thread-alist (nreverse thread-alist)))
-          (let* ((thread-id (int-to-string (car thread)))
-                 (thread-obj (cdr thread))
-                 (target-id (gdb--thread-target-id thread-obj)))
-            (push (cons (concat thread-id ": " target-id) thread-id) thread-alist)))
-        (setq thread (cdr (assoc (completing-read "Thread: " thread-alist nil t nil nil "All")
-                                 thread-alist))))
+      (setq thread (gdb--ask-for-thread nil t))
       (setq condition (read-from-minibuffer "Condition: ")))
     (gdb--command (concat "-break-insert -f " type
                           (and (> (length condition) 0) (concat " -c " (gdb--escape-argument
                                                                         condition)))
-                          (and (> (length thread) 0) (concat " -p " thread))
+                          (when thread (concat " -p " (int-to-string thread)))
                           " " location)
                   'gdb--context-breakpoint-insert
                   t)))
@@ -1028,6 +1025,33 @@ it will interrupt all threads."
     (when number-string
       (gdb--breakpoint-deleted number-string)
       (gdb--command (concat "-break-delete " number-string) 'gdb--context-ignore))))
+
+(defun gdb-disassemble (arg)
+  (interactive "P")
+  (let (type thread-id file line begin-address end-address)
+    (cond ((eq gdb--buffer-type 'gdb--threads) (setq type "Thread"))
+          ((eq gdb--buffer-type 'gdb--frames) (setq type "Function"))
+          ((buffer-file-name) (setq type "File+Line")))
+    (when (or arg (not type))
+      (setq type (completing-read "What? " '("Thread" "Function" "Address") nil t nil nil
+                                  type)))
+    (cond ((string= type "Thread")
+           (when (eq gdb--buffer-type 'gdb--threads)
+             (setq thread-id (get-text-property (point) 'gdb--thread-id)))
+           (when (or arg (not thread-id))
+             (setq thread-id (gdb--ask-for-thread thread-id)))
+           `((static . nil)
+             (thread-id . ,thread-id)))
+          ((string= type "Function")
+           `((static . t)
+             (thread-id . nil)
+             (file . ,file)
+             (line . ,line)))
+          ((string= type "Address")
+           `((static . t)
+             (thread-id . nil)
+             (begin-address . ,begin-address)
+             (end-address . ,end-address))))))
 
 (defun gdb-kill (&optional frame)
   "Kill GDB, and delete frame if there are more visible frames.
