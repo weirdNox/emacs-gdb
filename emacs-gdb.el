@@ -229,28 +229,39 @@ Possible values are:
      (with-current-buffer gdb--comint-buffer
        ,@body)))
 
-(defun gdb--command (command &optional context)
+(defun gdb--command (command &optional context force-stopped)
   "Execute GDB COMMAND.
 If provided, the CONTEXT is assigned to a unique token, which
 will be received, alongside the output, by the dynamic module,
-and used to know what the context of that output was.
+and used to know what the context of that output was. When
+FORCE-STOPPED is non-nil, ensure that exists at least one stopped
+thread before running the command.
 
 CONTEXT may be a cons (CONTEXT-TYPE . DATA), where DATA is
 anything relevant for the context, or just CONTEXT-TYPE.
 CONTEXT-TYPE must be a member of `gdb--available-contexts'."
-  (let* ((process (gdb--get-comint-process))
-         (context-type (or (when (consp context) (car context)) context))
-         token)
-    (when process
-      (when (memq context-type gdb--available-contexts)
-        (gdb--local
+  (gdb--local
+   (let* ((process (gdb--get-comint-process))
+          (context-type (or (when (consp context) (car context)) context))
+          token stopped-thread-id-str)
+     (when process
+       (when (memq context-type gdb--available-contexts)
          (setq token (int-to-string gdb--next-token)
                command (concat token command)
                gdb--next-token (1+ gdb--next-token))
          (when (not (consp context)) (setq context (cons context-type nil)))
          (push (cons token context) gdb--token-contexts)))
-      (comint-simple-send process command)
-      (when gdb-debug (message "Command %s" command)))))
+     (when (and force-stopped (> (length gdb--threads) 0))
+       (when (not (catch 'break
+                   (dolist (thread gdb--threads)
+                     (when (string= "stopped" (gdb--thread-state (cdr thread)))
+                       (throw 'break t)))))
+         (setq stopped-thread-id-str (int-to-string (car (car gdb--threads))))
+         (gdb--command (concat "-exec-interrupt --thread " stopped-thread-id-str))))
+     (comint-simple-send process command)
+     (when stopped-thread-id-str
+       (gdb--command (concat "-exec-continue --thread " stopped-thread-id-str)))
+     (when gdb-debug (message "Command %s" command)))))
 
 (defun gdb--local-command (command &optional context thread frame)
   "Execute GDB COMMAND in a specific THREAD and FRAME.
@@ -983,7 +994,8 @@ it will interrupt all threads."
                                                                         condition)))
                           (and (> (length thread) 0) (concat " -p " thread))
                           " " location)
-                  'gdb--context-breakpoint-insert)))
+                  'gdb--context-breakpoint-insert
+                  t)))
 
 (defun gdb-delete-breakpoint ()
   "TODO"
