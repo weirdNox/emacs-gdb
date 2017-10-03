@@ -253,9 +253,9 @@ CONTEXT-TYPE must be a member of `gdb--available-contexts'."
          (push (cons token context) gdb--token-contexts)))
      (when (and force-stopped (> (length gdb--threads) 0))
        (when (not (catch 'break
-                   (dolist (thread gdb--threads)
-                     (when (string= "stopped" (gdb--thread-state (cdr thread)))
-                       (throw 'break t)))))
+                    (dolist (thread gdb--threads)
+                      (when (string= "stopped" (gdb--thread-state (cdr thread)))
+                        (throw 'break t)))))
          (setq stopped-thread-id-str (int-to-string (car (car gdb--threads))))
          (gdb--command (concat "-exec-interrupt --thread " stopped-thread-id-str))))
      (comint-simple-send process command)
@@ -453,6 +453,14 @@ See `gdb--command' for the meaning of CONTEXT."
 (defun gdb--disassembly-update ()
   )
 
+(defun gdb--disassembly-fetch-info ()
+  (cond ((eq gdb--type 'thread)
+         (message "Not yet implemented"))
+        ((eq gdb--type 'function)
+         (message "Not yet implemented"))
+        ((eq gdb--type 'address)
+         (message "Not yet implemented"))))
+
 ;; ----------------------------------------------------------------------
 ;; NOTE(nox): Registers buffer
 (defun gdb--registers-init ()
@@ -493,27 +501,31 @@ See `gdb--command' for the meaning of CONTEXT."
                          "*")
                  t))
 
-(defun gdb--get-buffer (buffer-type &optional thread)
-  "Get existing GDB buffer of a specific BUFFER-TYPE, THREAD.
-When BUFFER-TYPE is `gdb--comint', THREAD is ignored for
-the comparison."
-  (catch 'found
-    (dolist (buffer (buffer-list))
-      (with-current-buffer buffer
-        (when (and (eq gdb--buffer-type buffer-type)
-                   (or (eq buffer-type 'gdb--comint)
-                       (eq gdb--thread-id thread)))
-          (throw 'found buffer))))))
+(defun gdb--get-buffer (buffer-type &optional parameters)
+  "Get existing GDB buffer of a specific BUFFER-TYPE."
+  (let (symbol)
+    (catch 'found
+      (dolist (buffer (buffer-list))
+        (with-current-buffer buffer
+          (when (and (eq gdb--buffer-type buffer-type)
+                     (catch 'break
+                       (dolist (parameter parameters)
+                         (setq
+                          symbol (intern (concat "gdb--" (symbol-name (car parameter)))))
+                         (when (not (and (boundp symbol)
+                                         (equal (symbol-value symbol) (cdr parameter))))
+                           (throw 'break nil)))
+                       t))
+            (throw 'found buffer)))))))
 
-(defun gdb--get-buffer-create (buffer-type &optional thread)
-  "Get GDB buffer of a specific BUFFER-TYPE and THREAD, creating it, if needed.
+(defun gdb--get-buffer-create (buffer-type &optional parameters force-creation)
+  "Get GDB buffer of a specific BUFFER-TYPE, creating it, if needed.
+When creating, assign `gdb--buffer-type' to BUFFER-TYPE.
+BUFFER-TYPE must be a member of `gdb--buffer-types'.
 
-When creating, assign `gdb--buffer-type' to BUFFER-TYPE. Also
-assign `gdb--thread-id' to THREAD, when provided.
-
-BUFFER-TYPE must be a member of `gdb--buffer-types'."
+TODO parameters"
   (when (memq buffer-type gdb--buffer-types)
-    (let ((buffer (gdb--get-buffer buffer-type thread))
+    (let ((buffer (when (not force-creation) (gdb--get-buffer buffer-type parameters)))
           (init-symbol (intern (concat (symbol-name buffer-type) "-init"))))
       (when (not buffer) (setq buffer (generate-new-buffer "*gdb-temp*")))
       (with-current-buffer buffer
@@ -523,8 +535,11 @@ BUFFER-TYPE must be a member of `gdb--buffer-types'."
             (insert "\n\n--------- New GDB session ---------\n"))
           (funcall init-symbol)
           (setq gdb--buffer-status t
-                gdb--buffer-type buffer-type
-                gdb--thread-id thread)))
+                gdb--buffer-type buffer-type)
+          (dolist (parameter parameters)
+            (set (make-local-variable
+                  (intern (concat "gdb--" (symbol-name (car parameter)))))
+                 (cdr parameter)))))
       buffer)))
 
 (defun gdb--update ()
@@ -1028,10 +1043,10 @@ it will interrupt all threads."
 
 (defun gdb-disassemble (arg)
   (interactive "P")
-  (let (type thread-id file line begin-address end-address)
+  (let (type thread-id file line begin-address end-address buffer)
     (cond ((eq gdb--buffer-type 'gdb--threads) (setq type "Thread"))
           ((eq gdb--buffer-type 'gdb--frames) (setq type "Function"))
-          ((buffer-file-name) (setq type "File+Line")))
+          ((buffer-file-name) (setq type "Function")))
     (when (or arg (not type))
       (setq type (completing-read "What? " '("Thread" "Function" "Address") nil t nil nil
                                   type)))
@@ -1040,18 +1055,25 @@ it will interrupt all threads."
              (setq thread-id (get-text-property (point) 'gdb--thread-id)))
            (when (or arg (not thread-id))
              (setq thread-id (gdb--ask-for-thread thread-id)))
-           `((static . nil)
-             (thread-id . ,thread-id)))
+           (setq buffer (gdb--get-buffer-create
+                         'gdb--disassembly `((type . thread)
+                                             (thread-id . ,thread-id)))))
           ((string= type "Function")
-           `((static . t)
-             (thread-id . nil)
+           ;; TODO(nox): This can't be like this, the same function may be referred to by
+           ;; different line numbers... :/ Or, as it is static, it doesn't matter?? Or
+           ;; maybe check the begin/end addresses, after grabbing all information, and if
+           ;; it already exists, kill the buffer? Maybe it is not worth the time..
+           `((type . function)
              (file . ,file)
              (line . ,line)))
           ((string= type "Address")
-           `((static . t)
-             (thread-id . nil)
+           `((type . address)
              (begin-address . ,begin-address)
-             (end-address . ,end-address))))))
+             (end-address . ,end-address))))
+    (when buffer
+      (with-selected-frame (make-frame '((name . "Emacs GDB - Disassembly")))
+        (switch-to-buffer buffer)
+        (gdb--disassembly-fetch-info)))))
 
 (defun gdb-kill (&optional frame)
   "Kill GDB, and delete frame if there are more visible frames.
