@@ -304,6 +304,33 @@ FrameInfo(emacs_env *Environment, struct gdbwire_mi_result *Result, emacs_value 
 }
 
 internal void
+Disassemble(emacs_env *Environment, struct gdbwire_mi_result *List, emacs_value Buffer)
+{
+#define SourceInfoVariablesWriter(W) W(Line, line), W(File, fullname)
+    enum { SourceInfoVariablesWriter(WriteVariableKey) };
+
+#define AssemblyVariablesWriter(W) W(Address, address),         \
+        W(Function, func-name),                                 \
+        W(Offset, offset),                                      \
+        W(Instruction, inst)
+    enum { AssemblyVariablesWriter(WriteVariableKey) };
+
+    bool HasSourceInfo = !strcmp(List->variable, "src_and_asm_line");
+    for(struct gdbwire_mi_result *Iterator;
+        Iterator;
+        Iterator = Iterator->next)
+    {
+        // IMPORTANT TODO(nox): Finish this
+        if(HasSourceInfo)
+        {
+        }
+        else
+        {
+        }
+    }
+}
+
+internal void
 HandleMiOobRecord(emacs_env *Environment, struct gdbwire_mi_oob_record *Record,
                   string_builder *PrintString)
 {
@@ -439,6 +466,7 @@ typedef struct
         Context_BreakpointInsert,
         Context_ThreadInfo,
         Context_FrameInfo,
+        Context_Disassemble,
 
         Context_Size,
     } Type;
@@ -505,6 +533,11 @@ HandleMiResultRecord(emacs_env *Environment, struct gdbwire_mi_result_record *Re
                 case Context_FrameInfo:
                 {
                     FrameInfo(Environment, GetResultList(Result, "stack"), Context.Data);
+                } break;
+
+                case Context_Disassemble:
+                {
+                    Disassemble(Environment, GetResultList(Result, "asm_insns"), Context.Data);
                 } break;
 
                 IgnoreDefaultCase;

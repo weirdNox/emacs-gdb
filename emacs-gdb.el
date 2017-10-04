@@ -69,6 +69,7 @@
     gdb--context-breakpoint-insert
     gdb--context-thread-info
     gdb--context-frame-info ;; With DATA: Thread ID string
+    gdb--context-disassemble ;; With DATA: Disassemble buffer
     )
   "List of implemented token contexts.
 Must be in the same order of the `token_context' enum in the
@@ -454,12 +455,32 @@ See `gdb--command' for the meaning of CONTEXT."
   )
 
 (defun gdb--disassembly-fetch-info ()
-  (cond ((eq gdb--type 'thread)
-         (message "Not yet implemented"))
-        ((eq gdb--type 'function)
-         (message "Not yet implemented"))
-        ((eq gdb--type 'address)
-         (message "Not yet implemented"))))
+  (let (file line addr)
+    (cond ((eq gdb--type 'thread)
+           (let ((thread-obj (gdb--local (alist-get gdb--thread-id gdb--threads)))
+                 frame func)
+             (when thread-obj
+               (setq frame (cdr (car (gdb--thread-frames thread-obj))))
+               (when frame
+                 (setq func (gdb--frame-func frame))
+                 (unless (and func (boundp 'gdb--func)
+                              (eq func gdb--func))
+                   (setq file (gdb--frame-file frame)
+                         line (gdb--frame-line frame)
+                         addr (gdb--frame-addr frame)))))))
+          ((eq gdb--type 'function)
+           (message "Not yet implemented"))
+          ((eq gdb--type 'address)
+           (message "Not yet implemented")))
+    (cond ((and file line)
+           (gdb--command (concat "-data-disassemble -f " file " -l " line
+                                 " -- 4")
+                         `(gdb--context-disassemble . ,(current-buffer))))
+          (addr
+           (gdb--command (concat "-data-disassemble -s " addr " -e "
+                                 (gdb--escape-argument (concat addr "+2000"))
+                                 " -- 4")
+                         `(gdb--context-disassemble . ,(current-buffer)))))))
 
 ;; ----------------------------------------------------------------------
 ;; NOTE(nox): Registers buffer
@@ -576,14 +597,15 @@ TODO parameters"
   (set-window-buffer window buffer)
   (set-window-dedicated-p window t))
 
-(defun gdb--display-source-buffer ()
+(defun gdb--display-source-buffer (&optional no-mark)
   "Display buffer of the selected source."
   (gdb--local
    (let ((buffer (gdb--find-file gdb--selected-file))
          (line gdb--selected-line)
          (window (gdb--local gdb--source-window)))
      (gdb--remove-all-symbols 'gdb--source-indicator t)
-     (gdb--place-symbol buffer line '((type . source-indicator)))
+     (unless no-mark
+       (gdb--place-symbol buffer line '((type . source-indicator))))
      (when (and (window-live-p window) buffer)
        (with-selected-window window
          (switch-to-buffer buffer)
@@ -623,7 +645,7 @@ TODO parameters"
     (if (and file line)
         (progn
           (gdb--local
-           (setq gdb--selected-file (gdb--complete-path file)
+           (setq gdb--selected-file file
                  gdb--selected-line (string-to-int line))
            (gdb--display-source-buffer)))
       (gdb--remove-all-symbols 'gdb--source-indicator t))
@@ -761,7 +783,7 @@ it from the list."
 (defun gdb--set-initial-file (file line-string)
   (gdb--local (setq gdb--selected-file (gdb--complete-path file)
                     gdb--selected-line (string-to-int line-string)))
-  (gdb--display-source-buffer))
+  (gdb--display-source-buffer t))
 
 (defun gdb--breakpoint-changed (number type disp enabled addr func fullname line at
                                        pending thread cond times what)
