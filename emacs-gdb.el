@@ -454,17 +454,23 @@ See `gdb--command' for the meaning of CONTEXT."
 (defun gdb--disassembly-update ()
   )
 
+(cl-defstruct gdb--instruction address function offset instruction)
+(cl-defstruct gdb--source-instr-info file line instr-list)
+
 (defun gdb--disassembly-fetch-info ()
   (let (file line addr)
     (cond ((eq gdb--type 'thread)
            (let ((thread-obj (gdb--local (alist-get gdb--thread-id gdb--threads)))
-                 frame func)
+                 frame identifier)
              (when thread-obj
                (setq frame (cdr (car (gdb--thread-frames thread-obj))))
                (when frame
-                 (setq func (gdb--frame-func frame))
-                 (unless (and func (boundp 'gdb--func)
-                              (eq func gdb--func))
+                 (let ((frame-file (gdb--frame-file frame))
+                       (func (gdb--frame-func frame)))
+                   (setq identifier (and frame-file func (concat frame-file ":" func))))
+                 (unless (and identifier (boundp 'gdb--disassembly-identifier)
+                              (equal identifier gdb--disassembly-identifier))
+                   (setq-local gdb--disassembly-identifier identifier)
                    (setq file (gdb--frame-file frame)
                          line (gdb--frame-line frame)
                          addr (gdb--frame-addr frame)))))))
