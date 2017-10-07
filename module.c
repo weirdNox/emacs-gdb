@@ -30,6 +30,7 @@ typedef size_t memory_size;
 u32 plugin_is_GPL_compatible;
 
 internal emacs_value Nil;
+internal emacs_value T;
 internal struct gdbwire_mi_parser *GdbMiParser;
 internal struct gdbwire_mi_output *ParserOutput;
 internal bool IgnoreNextPrompt;
@@ -396,6 +397,11 @@ Disassemble(emacs_env *Environment, struct gdbwire_mi_result *List, emacs_value 
         {
         }
     }
+
+    {
+        emacs_value Arguments[3] = {Buffer, DisassemblyList, HasSourceInfo ? T : Nil};
+        Funcall(Environment, "gdb--set-disassembly", 3, Arguments);
+    }
 }
 
 internal void
@@ -725,6 +731,7 @@ s32 emacs_module_init(struct emacs_runtime *EmacsRuntime)
     GdbMiParser = gdbwire_mi_parser_create(Callbacks);
 
     Nil = Intern(Environment, "nil");
+    T = Intern(Environment, "t");
 
     emacs_value Feature = Intern(Environment, "emacs-gdb-module");
     Funcall(Environment, "provide", 1, &Feature);

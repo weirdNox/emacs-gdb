@@ -347,7 +347,8 @@ See `gdb--command' for the meaning of CONTEXT."
              (line (gdb--breakpoint-line breakpoint)))
         (gdb--table-add-row table (list number type disp enabled-display addr hits what)
                             `(gdb--breakpoint-number ,number))
-        (gdb--place-symbol (gdb--find-file file) (when line (string-to-int line))
+        (gdb--place-symbol (gdb--find-file (gdb--complete-path file))
+                           (when line (string-to-int line))
                            `((type . breakpoint-indicator) (number . ,number)
                              (enabled . ,enabled) (source . t))))
       ;; TODO(nox): Place on disassembly buffers
@@ -675,6 +676,20 @@ Create the buffer, if it wasn't already open."
       (setq gdb--source-buffer t)
       (current-buffer))))
 
+(defun gdb--get-line (path line &optional trim)
+  "TODO"
+  (when (and path (> line 0))
+    (let ((buffer (gdb--find-file (gdb--complete-path path))))
+      (when buffer
+        (with-current-buffer buffer
+          (save-excursion
+            (goto-char (point-min))
+            (forward-line (1- line))
+            (let ((string (thing-at-point 'line)))
+              (if trim
+                  (replace-regexp-in-string "\\(\\`[[:space:]\n]*\\|[[:space:]\n]*\\'\\)" "" string)
+                string))))))))
+
 (defun gdb--current-line ()
   "Return an integer of the current line of point in the current
 buffer."
@@ -880,6 +895,36 @@ it from the list."
    (add-to-list 'gdb--buffers-to-update 'gdb--threads)
    (add-to-list 'gdb--buffers-to-update 'gdb--frames)))
 
+(defun gdb--set-disassembly (buffer list with-source-info)
+  (when (buffer-live-p buffer)
+    (with-current-buffer buffer
+      (let ((inhibit-read-only t)
+            (table (make-gdb--table)))
+        (erase-buffer)
+        (setq list (nreverse list))
+        (if with-source-info
+            (dolist (info list)
+              (let ((file (gdb--source-instr-info-file info))
+                    (line (gdb--source-instr-info-line info))
+                    (instr-list (nreverse (gdb--source-instr-info-instr-list info))))
+                (gdb--table-add-row table (list
+                                           (concat "Line " line)
+                                           (gdb--get-line file (and line (string-to-int line)) t)))
+                (dolist (instr instr-list)
+                  (message "%s" instr-list)
+                  (let ((addr (gdb--instruction-address instr))
+                        (func (gdb--instruction-function instr))
+                        (offset (gdb--instruction-offset instr))
+                        (instr (gdb--instruction-instruction instr)))
+                    (gdb--table-add-row table (list addr (format "%s+%-6s %s" func offset instr)))))))
+          (dolist (instr list)
+            (let ((addr (gdb--instruction-address instr))
+                  (func (gdb--instruction-function instr))
+                  (offset (gdb--instruction-offset instr))
+                  (instr (gdb--instruction-instruction instr)))
+              (gdb--table-add-row table (list addr (concat func "+" offset) instr)))))
+        (insert (gdb--table-string table " "))))))
+
 ;; ----------------------------------------------------------------------
 ;; NOTE(nox): Everything enclosed in here was adapted from gdb-mi.el
 (defun gdb--escape-argument (string)
@@ -964,7 +1009,7 @@ If ARG is non-nil, stop at the start of the inferior's main subprogram."
     (gdb--local-command "-exec-continue")))
 
 (defun gdb-interrupt (arg)
-  "Interrupt inferred tread, unless ARG is non-nil, in which case
+  "Interrupt inferred thread, unless ARG is non-nil, in which case
 it will interrupt all threads."
   (interactive "P")
   (if arg
@@ -1017,7 +1062,7 @@ it will interrupt all threads."
   (interactive "P")
   (let ((location (gdb--point-location))
         (type "")
-        (thread "")
+        (thread nil)
         (condition "")
         command)
     (when (or arg (not location))
