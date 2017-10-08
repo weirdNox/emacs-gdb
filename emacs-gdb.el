@@ -32,8 +32,16 @@
 ;; ----------------------------------------------------------------------
 ;; NOTE(nox): User variables
 (defvar gdb-debug nil
-  "If non `nil', print raw GDB/MI output and accept any
-  command.")
+  "List of debug symbols, which will enable different components.
+Possible values are:
+  - `gdb-debug-timings': show timings of some function calls
+  - `gdb-debug-log-commands': show which GDB commands are sent
+  - `gdb-debug-raw-input': send comint input as is
+  - `gdb-debug-raw-output': print GDB output as is
+  - `gdb-debug-all': the same as having every debug flag")
+
+(defvar gdb-disassembly-show-offset nil
+  "Whether or not to show function offset in the disassembly buffer.")
 
 ;; ----------------------------------------------------------------------
 ;; NOTE(nox): Private variables
@@ -120,6 +128,24 @@ Both are strings. FLAGS are the flags to be passed to
   "Alist of (ID . THREAD) pairs.
 ID is an integer and thread is a `gdb--thread'.")
 
+(cl-defstruct gdb--instruction address function offset instruction)
+(cl-defstruct gdb--source-instr-info file line instr-list)
+
+(defconst gdb--disassembly-font-lock-keywords
+  '(;; 0xNNNNNNNN opcode
+    ("^0x[[:xdigit:]]+[[:space:]]+\\(\\sw+\\)"
+     (1 font-lock-keyword-face))
+    ;; Hexadecimals
+    ("0x[[:xdigit:]]+" . font-lock-constant-face)
+    ;; Source lines
+    ("^Line.*$" . font-lock-comment-face)
+    ;; %register(at least i386)
+    ("%\\sw+" . font-lock-variable-name-face)
+    ;; <FunctionName+Number>
+    ("<\\([^()[:space:]+]+\\)\\(([^>+]*)\\)?\\(\\+[0-9]+\\)?>"
+     (1 font-lock-function-name-face)))
+  "Font lock keywords used in `gdb--disassembly'.")
+
 (defconst gdb--buffer-types
   '(gdb--comint
     gdb--inferior-io
@@ -154,9 +180,14 @@ Possible values are:
   - `dead', if was initialized previously, but GDB was killed afterwards
   - `t', if initialized")
 
-(defvar-local gdb--buffers-to-update gdb--buffer-types
-  "List of buffers types to redraw. Used when new information is
-  available.")
+(defvar-local gdb--buffers-to-update nil
+  "List of specific buffers to redraw. Used when new information
+  is available.")
+
+(defvar-local gdb--buffer-types-to-update gdb--buffer-types
+  "List of either `gdb--buffer-type' to redraw. Used when new
+  information is available and will update all buffers of a
+  type.")
 
 ;; ----------------------------------------------------------------------
 ;; NOTE(nox): GDB comint buffer
@@ -199,19 +230,21 @@ Possible values are:
 
 (defun gdb--comint-sender (process string)
   "Send user commands from comint."
-  (if gdb-debug
+  (if (gdb--debug-check 'gdb-debug-raw-input)
       (comint-simple-send process string)
     (comint-simple-send process (concat "-interpreter-exec console "
                                         (gdb--escape-argument string)))))
 
 (defun gdb--output-filter (string)
   "Parse GDB/MI output."
-  (let ((output (gdb--handle-mi-output string)))
+  (let ((output (gdb--measure-time
+                 "Handle MI Output"
+                 (gdb--handle-mi-output string))))
     (gdb--update)
-    (if gdb-debug
-        (progn
-          (message "--------------------")
-          (concat string "--------------------\n"))
+    (gdb--debug-execute-body '(gdb-debug-timings gdb-debug-log-commands)
+                             (message "--------------------"))
+    (if (gdb--debug-check 'gdb-debug-raw-output)
+        (concat string "--------------------\n")
       output)))
 
 (defun gdb--comint-sentinel (process str)
@@ -262,7 +295,7 @@ CONTEXT-TYPE must be a member of `gdb--available-contexts'."
      (comint-simple-send process command)
      (when stopped-thread-id-str
        (gdb--command (concat "-exec-continue --thread " stopped-thread-id-str)))
-     (when gdb-debug (message "Command %s" command)))))
+     (when (gdb--debug-check 'gdb-debug-log-commands) (message "Command %s" command)))))
 
 (defun gdb--local-command (command &optional context thread frame)
   "Execute GDB COMMAND in a specific THREAD and FRAME.
@@ -348,7 +381,7 @@ See `gdb--command' for the meaning of CONTEXT."
         (gdb--table-add-row table (list number type disp enabled-display addr hits what)
                             `(gdb--breakpoint-number ,number))
         (gdb--place-symbol (gdb--find-file (gdb--complete-path file))
-                           (when line (string-to-int line))
+                           (when line (string-to-number line))
                            `((type . breakpoint-indicator) (number . ,number)
                              (enabled . ,enabled) (source . t))))
       ;; TODO(nox): Place on disassembly buffers
@@ -450,13 +483,84 @@ See `gdb--command' for the meaning of CONTEXT."
 ;; ----------------------------------------------------------------------
 ;; NOTE(nox): Disassembly buffer
 (defun gdb--disassembly-init ()
-  (gdb--init-buffer "Disassembly"))
+  (gdb--init-buffer "Disassembly")
+  (set (make-local-variable 'font-lock-defaults)
+       '(gdb--disassembly-font-lock-keywords)))
 
 (defun gdb--disassembly-update ()
-  )
-
-(cl-defstruct gdb--instruction address function offset instruction)
-(cl-defstruct gdb--source-instr-info file line instr-list)
+  (let ((list (when (boundp 'gdb--disassembly-list) gdb--disassembly-list))
+        (with-source-info (when (boundp 'gdb--with-source-info) gdb--with-source-info))
+        should-enable-font-lock begin end)
+    (gdb--measure-time
+     "Disassembly: Reverse main list" (setq list (nreverse list)))
+    (gdb--measure-time
+     "Disassembly: Set begin addr"
+     (if with-source-info
+         (let* ((info (car list))
+                (instr-list (when info (gdb--source-instr-info-instr-list info)))
+                ;; NOTE(nox): We need last because the list is not in order
+                (first-instr (car (last instr-list))))
+           (when first-instr (setq begin (gdb--instruction-address first-instr))))
+       (let* ((first-instr (car list)))
+         (when first-instr (setq begin (gdb--instruction-address first-instr))))))
+    (gdb--measure-time
+     "Disassembly: Create contents string"
+     (when font-lock-mode
+       (setq should-enable-font-lock t)
+       (font-lock-mode 0))
+     (erase-buffer)
+     (if with-source-info
+         (dolist (info list)
+           (let* ((file (gdb--source-instr-info-file info))
+                  (line (gdb--source-instr-info-line info))
+                  (line-contents (gdb--get-line file (and line (string-to-number line)) t))
+                  (instr-list (nreverse (gdb--source-instr-info-instr-list info))))
+             (when instr-list
+               (setq end (gdb--instruction-address (car (last instr-list)))))
+             (setf (gdb--source-instr-info-instr-list info) instr-list)
+             (when line-contents
+               (insert (format "%-20s %s\n" (concat "Line " line) line-contents)))
+             (dolist (instr instr-list)
+               (insert (if gdb-disassembly-show-offset
+                           (format "%-20s %-50s %s\n"
+                                   (gdb--instruction-address instr)
+                                   (gdb--instruction-instruction instr)
+                                   (concat "<" (gdb--instruction-function instr) "+"
+                                           (gdb--instruction-offset instr) ">"))
+                         (format "%-20s %s\n"
+                                 (gdb--instruction-address instr)
+                                 (gdb--instruction-instruction instr)))))))
+       (when list
+         (setq end (gdb--instruction-address (car (last list)))))
+       (dolist (instr list)
+         (insert (if gdb-disassembly-show-offset
+                     (format "%-20s %-50s %s\n"
+                             (gdb--instruction-address instr)
+                             (gdb--instruction-instruction instr)
+                             (concat "<" (gdb--instruction-function instr) "+"
+                                     (gdb--instruction-offset instr) ">"))
+                   (format "%-20s %s\n"
+                           (gdb--instruction-address instr)
+                           (gdb--instruction-instruction instr))))))
+     (when should-enable-font-lock
+       (font-lock-mode 1)))
+    (gdb--measure-time
+     "Disassembly: Misc"
+     (setq-local gdb--begin-address (gdb--convert-hex-to-number begin))
+     (setq-local gdb--end-address (gdb--convert-hex-to-number end))
+     (gdb--scroll-buffer-to-line (current-buffer) 1)
+     (when (and gdb--begin-address gdb--end-address)
+       (dolist (buffer-iter (buffer-list))
+         (unless (eq buffer-iter (current-buffer))
+           (let (iter-type iter-begin iter-end)
+             (with-current-buffer buffer-iter
+               (when (eq gdb--buffer-type 'gdb--disassembly)
+                 (setq iter-type gdb--type
+                       iter-begin (when (boundp 'gdb--begin-address) gdb--begin-address)
+                       iter-end (when (boundp 'gdb--end-address) gdb--end-address))))
+             (when (and (eq gdb--type iter-type)
+                        (eq gdb--begin-address iter-begin)
+                        (eq gdb--end-address iter-end))))))))))
 
 (defun gdb--disassembly-fetch-info ()
   (let (file line addr)
@@ -466,15 +570,9 @@ See `gdb--command' for the meaning of CONTEXT."
              (when thread-obj
                (setq frame (cdr (car (gdb--thread-frames thread-obj))))
                (when frame
-                 (let ((frame-file (gdb--frame-file frame))
-                       (func (gdb--frame-func frame)))
-                   (setq identifier (and frame-file func (concat frame-file ":" func))))
-                 (unless (and identifier (boundp 'gdb--disassembly-identifier)
-                              (equal identifier gdb--disassembly-identifier))
-                   (setq-local gdb--disassembly-identifier identifier)
-                   (setq file (gdb--frame-file frame)
-                         line (gdb--frame-line frame)
-                         addr (gdb--frame-addr frame)))))))
+                 (setq file (gdb--frame-file frame)
+                       line (gdb--frame-line frame)
+                       addr (gdb--frame-addr frame))))))
           ((eq gdb--type 'function)
            (message "Not yet implemented"))
           ((eq gdb--type 'address)
@@ -488,6 +586,12 @@ See `gdb--command' for the meaning of CONTEXT."
                                  (gdb--escape-argument (concat addr "+2000"))
                                  " -- 4")
                          `(gdb--context-disassemble . ,(current-buffer)))))))
+
+(defun gdb--convert-hex-to-number (hex-string)
+  (if (not (and hex-string (stringp hex-string)))
+      -1
+    (setq hex-string (substring hex-string 2))
+    (string-to-number hex-string 16)))
 
 ;; ----------------------------------------------------------------------
 ;; NOTE(nox): Registers buffer
@@ -571,16 +675,24 @@ TODO parameters"
       buffer)))
 
 (defun gdb--update ()
-  (let ((types-to-update (gdb--local gdb--buffers-to-update))
-        (inhibit-read-only t)
-        symbol)
-    (dolist (buffer (buffer-list))
-      (with-current-buffer buffer
-        (when (memq gdb--buffer-type types-to-update)
-          (setq symbol (intern (concat (symbol-name gdb--buffer-type) "-update")))
-          (when gdb-debug (message "Calling %s..." (symbol-name symbol)))
-          (funcall symbol)))))
-  (gdb--local (setq gdb--buffers-to-update nil)))
+  (gdb--local
+   (let ((inhibit-read-only t)
+         (buffers-to-update gdb--buffers-to-update)
+         (types-to-update gdb--buffer-types-to-update)
+         symbol)
+     (dolist (buffer (buffer-list))
+       (with-current-buffer buffer
+         (when (memq gdb--buffer-type types-to-update)
+           (setq symbol (intern (concat (symbol-name gdb--buffer-type) "-update")))
+           (gdb--measure-time (concat "Calling " (symbol-name symbol)) (funcall symbol)))))
+     (dolist (buffer buffers-to-update)
+       (when (and (buffer-live-p buffer) (not (memq (buffer-local-value 'gdb--buffer-type buffer)
+                                                    types-to-update)))
+         (with-current-buffer buffer
+           (setq symbol (intern (concat (symbol-name gdb--buffer-type) "-update")))
+           (gdb--measure-time (concat "Calling " (symbol-name symbol)) (funcall symbol)))))
+     (setq gdb--buffers-to-update nil
+           gdb--buffer-types-to-update nil))))
 
 (defun gdb--setup-windows ()
   (delete-other-windows)
@@ -631,7 +743,7 @@ TODO parameters"
                     (not (string= "stopped" (gdb--thread-state selected-thread)))))
        (setq gdb--thread-id thread-id)
        (when thread-id
-         (add-to-list 'gdb--buffers-to-update 'gdb--frames)
+         (add-to-list 'gdb--buffer-types-to-update 'gdb--frames)
          (gdb--update)
          (dolist (buffer (buffer-list))
            (with-current-buffer buffer
@@ -653,7 +765,7 @@ TODO parameters"
         (progn
           (gdb--local
            (setq gdb--selected-file file
-                 gdb--selected-line (string-to-int line))
+                 gdb--selected-line (string-to-number line))
            (gdb--display-source-buffer)))
       (gdb--remove-all-symbols 'gdb--source-indicator t))
     (dolist (buffer (buffer-list))
@@ -672,7 +784,7 @@ TODO parameters"
   "Return the buffer of the file specified by PATH.
 Create the buffer, if it wasn't already open."
   (when (and path (not (file-directory-p path)) (file-readable-p path))
-    (with-current-buffer (find-file-noselect path)
+    (with-current-buffer (find-file-noselect path t)
       (setq gdb--source-buffer t)
       (current-buffer))))
 
@@ -762,6 +874,32 @@ or in a special GDB buffer (eg. disassembly buffer)."
      (cdr (assoc (completing-read "Thread: " collection nil t nil nil default-string)
                  collection)))))
 
+(defun gdb--debug-check (debug-symbol)
+  "Will return t when DEBUG-SYMBOL or `gdb-debug-all' is in `gdb-debug'.
+Otherwise, return `nil'. DEBUG-SYMBOL may be a symbol or a list
+of symbols."
+  (or (memq 'gdb-debug-all gdb-debug)
+      (if (listp debug-symbol)
+          (catch 'break
+            (dolist (symbol debug-symbol)
+              (when (memq symbol gdb-debug) (throw 'break t))))
+        (memq debug-symbol gdb-debug))))
+
+(defmacro gdb--debug-execute-body (debug-symbol &rest body)
+  "Execute body when DEBUG-SYMBOL or `gdb-debug-all' is in `gdb-debug'.
+DEBUG-SYMBOL may be a symbol or a list of symbols."
+  (when (gdb--debug-check (eval debug-symbol))
+    `(progn ,@body)))
+
+(defmacro gdb--measure-time (string &rest body)
+  "Measure the time it takes to evaluate BODY."
+  (if (gdb--debug-check 'gdb-debug-timings)
+      `(let ((time (current-time))
+             (result (progn ,@body)))
+         (message "%s: %.06fs" ,string (float-time (time-since time)))
+         result)
+    `(progn ,@body)))
+
 ;; ----------------------------------------------------------------------
 ;; NOTE(nox): Functions to be called by the dynamic module
 (defun gdb--extract-context (token-string)
@@ -788,28 +926,28 @@ it from the list."
 (defun gdb--error ())
 
 (defun gdb--running (thread-id)
-  (setq thread-id (string-to-int thread-id))
+  (setq thread-id (string-to-number thread-id))
   (gdb--local
    (let ((thread (alist-get thread-id gdb--threads)))
      (when thread
        (setf (gdb--thread-state thread) "running")
        (setf (gdb--thread-frames thread) nil)
-       (add-to-list 'gdb--buffers-to-update 'gdb--threads)
-       (add-to-list 'gdb--buffers-to-update 'gdb--frames)))
+       (add-to-list 'gdb--buffer-types-to-update 'gdb--threads)
+       (add-to-list 'gdb--buffer-types-to-update 'gdb--frames)))
    (when (eq thread-id gdb--thread-id) (gdb--remove-all-symbols 'gdb--source-indicator t))))
 
 (defun gdb--stopped (thread-id)
-  (gdb--switch-to-thread (and thread-id (string-to-int thread-id))))
+  (gdb--switch-to-thread (and thread-id (string-to-number thread-id))))
 
 (defun gdb--set-initial-file (file line-string)
   (gdb--local (setq gdb--selected-file (gdb--complete-path file)
-                    gdb--selected-line (string-to-int line-string)))
+                    gdb--selected-line (string-to-number line-string)))
   (gdb--display-source-buffer t))
 
 (defun gdb--breakpoint-changed (number type disp enabled addr func fullname line at
                                        pending thread cond times what)
   (gdb--local
-   (let* ((number (string-to-int number))
+   (let* ((number (string-to-number number))
           (breakpoint
            (make-gdb--breakpoint
             :type (or type "")
@@ -833,29 +971,29 @@ it from the list."
      (if existing
          (setf (alist-get number gdb--breakpoints) breakpoint)
        (add-to-list 'gdb--breakpoints `(,number . ,breakpoint) t))
-     (add-to-list 'gdb--buffers-to-update 'gdb--breakpoints))))
+     (add-to-list 'gdb--buffer-types-to-update 'gdb--breakpoints))))
 
 (defun gdb--breakpoint-deleted (number)
   (gdb--local
-   (setq number (string-to-int number))
+   (setq number (string-to-number number))
    (setq gdb--breakpoints (assq-delete-all number gdb--breakpoints))
-   (add-to-list 'gdb--buffers-to-update 'gdb--breakpoints)))
+   (add-to-list 'gdb--buffer-types-to-update 'gdb--breakpoints)))
 
 (defun gdb--get-thread-info (&optional id-str)
   (gdb--command (concat "-thread-info " id-str) 'gdb--context-thread-info))
 
 (defun gdb--thread-exited (thread-id)
   (gdb--local
-   (setq thread-id (string-to-int thread-id)
+   (setq thread-id (string-to-number thread-id)
          gdb--threads (assq-delete-all thread-id gdb--threads))
    (when (eq thread-id gdb--thread-id)
      (gdb--switch-to-thread (car (car gdb--threads)) t))
-   (add-to-list 'gdb--buffers-to-update 'gdb--threads))
-  (add-to-list 'gdb--buffers-to-update 'gdb--frames))
+   (add-to-list 'gdb--buffer-types-to-update 'gdb--threads))
+  (add-to-list 'gdb--buffer-types-to-update 'gdb--frames))
 
 (defun gdb--update-thread (id-str target-id name state core)
   (gdb--local
-   (let* ((id (string-to-int id-str))
+   (let* ((id (string-to-number id-str))
           (thread
            (make-gdb--thread
             :target-id target-id
@@ -872,58 +1010,35 @@ it from the list."
                        (cons 'gdb--context-frame-info id-str))
        ;; NOTE(nox): Only update when it is running, otherwise it will update when the
        ;; frame list arrives.
-       (add-to-list 'gdb--buffers-to-update 'gdb--threads)))))
+       (add-to-list 'gdb--buffer-types-to-update 'gdb--threads)))))
 
 (defun gdb--clear-thread-frames (thread-id)
   (gdb--local
-   (setf (gdb--thread-frames (alist-get (string-to-int thread-id) gdb--threads)) nil)))
+   (setf (gdb--thread-frames (alist-get (string-to-number thread-id) gdb--threads)) nil)))
 
 (defun gdb--add-frame-to-thread (thread-id level addr func file line from)
   (gdb--local
-   (push (cons (string-to-int level)
+   (push (cons (string-to-number level)
                (make-gdb--frame  :addr addr :func func :file file
                                  :line line :from from))
-         (gdb--thread-frames (alist-get (string-to-int thread-id) gdb--threads)))))
+         (gdb--thread-frames (alist-get (string-to-number thread-id) gdb--threads)))))
 
 (defun gdb--finalize-thread-frames (thread-id)
   (gdb--local
-   (setq thread-id (string-to-int thread-id))
+   (setq thread-id (string-to-number thread-id))
    (let* ((thread (alist-get thread-id gdb--threads))
           (frames (gdb--thread-frames thread)))
      (setf (gdb--thread-frames (alist-get thread-id gdb--threads))
            (nreverse frames)))
-   (add-to-list 'gdb--buffers-to-update 'gdb--threads)
-   (add-to-list 'gdb--buffers-to-update 'gdb--frames)))
+   (add-to-list 'gdb--buffer-types-to-update 'gdb--threads)
+   (add-to-list 'gdb--buffer-types-to-update 'gdb--frames)))
 
 (defun gdb--set-disassembly (buffer list with-source-info)
   (when (buffer-live-p buffer)
     (with-current-buffer buffer
-      (let ((inhibit-read-only t)
-            (table (make-gdb--table)))
-        (erase-buffer)
-        (setq list (nreverse list))
-        (if with-source-info
-            (dolist (info list)
-              (let ((file (gdb--source-instr-info-file info))
-                    (line (gdb--source-instr-info-line info))
-                    (instr-list (nreverse (gdb--source-instr-info-instr-list info))))
-                (gdb--table-add-row table (list
-                                           (concat "Line " line)
-                                           (gdb--get-line file (and line (string-to-int line)) t)))
-                (dolist (instr instr-list)
-                  (message "%s" instr-list)
-                  (let ((addr (gdb--instruction-address instr))
-                        (func (gdb--instruction-function instr))
-                        (offset (gdb--instruction-offset instr))
-                        (instr (gdb--instruction-instruction instr)))
-                    (gdb--table-add-row table (list addr (format "%s+%-6s %s" func offset instr)))))))
-          (dolist (instr list)
-            (let ((addr (gdb--instruction-address instr))
-                  (func (gdb--instruction-function instr))
-                  (offset (gdb--instruction-offset instr))
-                  (instr (gdb--instruction-instruction instr)))
-              (gdb--table-add-row table (list addr (concat func "+" offset) instr)))))
-        (insert (gdb--table-string table " "))))))
+      (setq-local gdb--disassembly-list list)
+      (setq-local gdb--with-source-info with-source-info))
+    (add-to-list 'gdb--buffers-to-update buffer)))
 
 ;; ----------------------------------------------------------------------
 ;; NOTE(nox): Everything enclosed in here was adapted from gdb-mi.el

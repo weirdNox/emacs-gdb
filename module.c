@@ -395,6 +395,7 @@ Disassemble(emacs_env *Environment, struct gdbwire_mi_result *List, emacs_value 
         }
         else
         {
+            // TODO(nox): Finish this section
         }
     }
 
