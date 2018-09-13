@@ -474,7 +474,6 @@ HandleMiOobRecord(emacs_env *Environment, struct gdbwire_mi_oob_record *Record,
                 {
                     switch(AsyncRecord->async_class)
                     {
-                        // TODO(nox): Check if we need more handlers
                         case GDBWIRE_MI_ASYNC_THREAD_CREATED:
                         {
                             char *ThreadId = GetResultString(Result, "id");
@@ -724,8 +723,7 @@ s32 emacs_module_init(struct emacs_runtime *EmacsRuntime)
 
     emacs_value Arguments[2];
     Arguments[0] = Intern(Environment, HANDLE_GDB_MI_OUTPUT_NAME);
-    Arguments[1] = Environment->make_function(Environment, 1, 1, HandleGdbMiOutput,
-                                              HANDLE_GDB_MI_OUTPUT_DOC, 0);
+    Arguments[1] = Environment->make_function(Environment, 1, 1, HandleGdbMiOutput, HANDLE_GDB_MI_OUTPUT_DOC, 0);
     Funcall(Environment, "fset", 2, Arguments);
 
     struct gdbwire_mi_parser_callbacks Callbacks = {0, GdbWireCallback};

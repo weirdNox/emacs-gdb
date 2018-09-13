@@ -24,13 +24,13 @@
 ;; This will be a replacement for GDB mode.
 
 ;;; Code:
+(require 'cl-lib)
+(require 'comint)
 (add-to-list 'load-path (expand-file-name "."))
 (require 'emacs-gdb-module)
-(require 'comint)
-(require 'cl-lib)
 
-;; ----------------------------------------------------------------------
-;; NOTE(nox): User variables
+;; ------------------------------------------------------------------------------------------
+;; User variables
 (defvar gdb-debug nil
   "List of debug symbols, which will enable different components.
 Possible values are:
@@ -43,93 +43,84 @@ Possible values are:
 (defvar gdb-disassembly-show-offset nil
   "Whether or not to show function offset in the disassembly buffer.")
 
-;; ----------------------------------------------------------------------
-;; NOTE(nox): Private variables
-(defvar gdb--last-debuggee nil
-  "Last executable to be ran by GDB.")
-
-(defvar gdb--last-args nil
-  "Last args to be passed to GDB.")
-
-(defvar gdb--comint-buffer nil
-  "Buffer where the GDB process runs.")
-
-(defvar-local gdb--frame nil
-  "The Emacs frame where GDB runs.")
-
-(defvar-local gdb--source-window nil
-  "Window where GDB shows its source files.")
-
-(defvar-local gdb--selected-file ""
-  "Name of the selected file for the main selected thread.")
-
-(defvar-local gdb--selected-line 0
-  "Number of the selected line for the main selected thread.")
-
-(define-fringe-bitmap 'gdb--arrow "\xe0\x90\x88\x84\x84\x88\x90\xe0")
-
-(defvar-local gdb--next-token 0
-  "Next token for a GDB command.")
+;; ------------------------------------------------------------------------------------------
+;; Private variables and constants
+(defvar gdb--previous-executable nil
+  "Previous executable path.")
 
 (defconst gdb--available-contexts
   '(gdb--context-ignore
     gdb--context-initial-file
     gdb--context-breakpoint-insert
     gdb--context-thread-info
-    gdb--context-frame-info ;; With DATA: Thread ID string
-    gdb--context-disassemble ;; With DATA: Disassemble buffer
+    gdb--context-frame-info  ;; DATA: Thread ID string
+    gdb--context-disassemble ;; DATA: Disassemble buffer
     )
   "List of implemented token contexts.
 Must be in the same order of the `token_context' enum in the
 dynamic module.")
 
-(defvar-local gdb--token-contexts '()
-  "Alist of (TOKEN . (CONTEXT . DATA)) pairs.
-TOKEN must be the decimal representation of a token as a string
-and CONTEXT must be a member of `gdb--available-contexts'. DATA
-may be any type of data, and will be CONTEXT specific.")
+(defconst gdb--buffer-types
+  '(gdb--comint
+    gdb--inferior-io
+    gdb--breakpoints
+    gdb--threads
+    gdb--frames
+    gdb--disassembly
+    gdb--registers
+    gdb--locals
+    gdb--expression-watcher)
+  "List of available buffer types.")
+
+(defconst gdb--buffers-to-keep '(gdb--comint gdb--inferior-io)
+  "List of buffer types that should be kept after GDB is killed.")
+
+(cl-defstruct gdb--frame thread-id addr func file line from)
+(cl-defstruct gdb--thread target-id name state core frames)
 
 (cl-defstruct gdb--breakpoint type disp enabled addr hits what file line)
-(defvar-local gdb--breakpoints nil
-  "Alist of (NUMBER . BREAKPOINT) pairs.
-NUMBER is an integer and BREAKPOINT is a `gdb--breakpoint'.")
-
 (defconst gdb--available-breakpoint-types
   '(("Breakpoint" . "")
     ("Temporary Breakpoint" . "-t")
     ("Hardware Breakpoint" . "-h")
     ("Temporary Hardware Breakpoint" . "-t -h"))
   "Alist of (TYPE . FLAGS).
-Both are strings. FLAGS are the flags to be passed to
--break-insert in order to create a breakpoint of TYPE.")
+Both are strings. FLAGS are the flags to be passed to -break-insert in order to create a
+breakpoint of TYPE.")
 
-(define-fringe-bitmap 'gdb--breakpoint "\x3c\x7e\xff\xff\xff\xff\x7e\x3c")
+(cl-defstruct gdb--session
+  id frame process buffers source-window
+  (buffer-types-to-update gdb--buffer-types) buffers-to-update
+  (next-token 0) token-contexts ;; (TOKEN . (CONTEXT . DATA))
+  current-frame threads
+  breakpoints)
+(defvar gdb--sessions nil
+  "List of gdb--session.")
+
+(cl-defstruct gdb--instruction address function offset instruction)
+(cl-defstruct gdb--source-instr-info file line instr-list)
+
+(cl-defstruct gdb--buffer-info session type thread update-defun data)
+(defvar-local gdb--buffer-info nil
+  "GDB related information related to each buffer.")
+
+;; ------------------------------------------------------------------------------------------
+;; Faces and bitmaps
+(define-fringe-bitmap 'gdb--fringe-breakpoint "\x3c\x7e\xff\xff\xff\xff\x7e\x3c")
+(define-fringe-bitmap 'gdb--fringe-arrow "\xe0\x90\x88\x84\x84\x88\x90\xe0")
 
 (defface gdb--breakpoint-enabled
-  '((t
-     :foreground "red1"
-     :weight bold))
+  '((t :foreground "red1"
+       :weight bold))
   "Face for enabled breakpoint icon in fringe.")
 
 (defface gdb--breakpoint-disabled
   '((((class color) (min-colors 88)) :foreground "grey70")
-    (((class color) (min-colors 8) (background light))
-     :foreground "black")
-    (((class color) (min-colors 8) (background dark))
-     :foreground "white")
-    (((type tty) (class mono))
-     :inverse-video t)
+    (((class color) (min-colors 8) (background light)) :foreground "black")
+    (((class color) (min-colors 8) (background dark)) :foreground "white")
+    (((type tty) (class mono)) :inverse-video t)
     (t :background "gray"))
   "Face for disabled breakpoint icon in fringe.")
-
-(cl-defstruct gdb--frame addr func file line from)
-(cl-defstruct gdb--thread target-id name state core frames)
-(defvar-local gdb--threads nil
-  "Alist of (ID . THREAD) pairs.
-ID is an integer and thread is a `gdb--thread'.")
-
-(cl-defstruct gdb--instruction address function offset instruction)
-(cl-defstruct gdb--source-instr-info file line instr-list)
 
 (defconst gdb--disassembly-font-lock-keywords
   '(;; 0xNNNNNNNN opcode
@@ -146,85 +137,9 @@ ID is an integer and thread is a `gdb--thread'.")
      (1 font-lock-function-name-face)))
   "Font lock keywords used in `gdb--disassembly'.")
 
-(defconst gdb--buffer-types
-  '(gdb--comint
-    gdb--inferior-io
-    gdb--breakpoints
-    gdb--threads
-    gdb--frames
-    gdb--disassembly
-    gdb--registers
-    gdb--locals
-    gdb--expression-watcher)
-  "List of available buffer types.")
+;; ------------------------------------------------------------------------------------------
+;; GDB comint buffer
 
-(defconst gdb--buffers-to-keep
-  '(gdb--comint
-    gdb--inferior-io)
-  "List of buffer types that should be kept after GDB is killed.")
-
-(defvar-local gdb--buffer-type nil
-  "Type of current GDB buffer.")
-
-(defvar-local gdb--source-buffer nil
-  "Specifies whether or not this buffer is a source file buffer.")
-
-(defvar-local gdb--thread-id nil
-  "Number of the thread associated with the current GDB buffer.
-The main selected thread is set on the GDB comint buffer.")
-
-(defvar-local gdb--buffer-status nil
-  "Status of a GDB buffer.
-Possible values are:
-  - `nil', if never initialized
-  - `dead', if was initialized previously, but GDB was killed afterwards
-  - `t', if initialized")
-
-(defvar-local gdb--buffers-to-update nil
-  "List of specific buffers to redraw. Used when new information
-  is available.")
-
-(defvar-local gdb--buffer-types-to-update gdb--buffer-types
-  "List of either `gdb--buffer-type' to redraw. Used when new
-  information is available and will update all buffers of a
-  type.")
-
-;; ----------------------------------------------------------------------
-;; NOTE(nox): GDB comint buffer
-(defun gdb--comint-init ()
-  (kill-all-local-variables)
-  (let* ((debuggee gdb--last-debuggee)
-         (extra-args gdb--last-args)
-         (debuggee-name (file-name-nondirectory debuggee))
-         (debuggee-path (file-name-directory debuggee))
-         (debuggee-exists (and (not (string= "" debuggee-name)) (file-executable-p debuggee)))
-         (switches (split-string extra-args))
-         (frame-name (concat "Emacs GDB" (when debuggee-exists
-                                           (concat " - Debugging " debuggee-name)))))
-    (gdb--rename-buffer debuggee-name)
-    (setq gdb--comint-buffer (current-buffer))
-    ;; TODO(nox): We should rename this if file is changed inside GDB, no? Is there a
-    ;; way??
-    (modify-frame-parameters nil `((name . ,frame-name)))
-    (push "-i=mi" switches)
-    (when debuggee-exists
-      (cd debuggee-path)
-      (push debuggee switches))
-    (apply 'make-comint-in-buffer "GDB" (current-buffer) "gdb" nil switches)
-    (setq-local comint-use-prompt-regexp t)
-    (setq-local comint-prompt-regexp "^(gdb) ")
-    (setq-local comint-prompt-read-only nil)
-    (setq-local mode-line-process '(":%s"))
-    (setq-local paragraph-separate "\\'")
-    (setq-local paragraph-start comint-prompt-regexp)
-    (setq-local comint-input-sender 'gdb--comint-sender)
-    (setq-local comint-preoutput-filter-functions '(gdb--output-filter))
-    (set-process-sentinel (get-buffer-process (current-buffer)) 'gdb--comint-sentinel)
-    (setq gdb--frame (selected-frame))
-    (gdb--command "-gdb-set mi-async on" 'gdb--context-ignore)
-    ;; TODO(nox): Add customization for these settings?
-    (gdb--command "-gdb-set non-stop on" 'gdb--context-ignore)
-    (gdb--command "-file-list-exec-source-file" 'gdb--context-initial-file)))
 
 (fset 'gdb--comint-update 'ignore)
 
@@ -237,12 +152,9 @@ Possible values are:
 
 (defun gdb--output-filter (string)
   "Parse GDB/MI output."
-  (let ((output (gdb--measure-time
-                 "Handle MI Output"
-                 (gdb--handle-mi-output string))))
+  (let ((output (gdb--measure-time "Handle MI Output" (gdb--handle-mi-output string))))
     (gdb--update)
-    (gdb--debug-execute-body '(gdb-debug-timings gdb-debug-log-commands)
-                             (message "--------------------"))
+    (gdb--debug-execute-body '(gdb-debug-timings gdb-debug-log-commands) (message "--------------------"))
     (if (gdb--debug-check 'gdb-debug-raw-output)
         (concat string "--------------------\n")
       output)))
@@ -325,8 +237,8 @@ See `gdb--command' for the meaning of CONTEXT."
                         (and thread frame (concat " --frame " frame)))
                 context))
 
-;; ----------------------------------------------------------------------
-;; NOTE(nox): Inferior I/O buffer
+;; ------------------------------------------------------------------------------------------
+;; Inferior I/O buffer
 (defun gdb--inferior-io-init ()
   (gdb--rename-buffer "Inferior I/O")
   (let* ((inferior-process (get-buffer-process
@@ -353,8 +265,8 @@ See `gdb--command' for the meaning of CONTEXT."
           (with-current-buffer buffer
             (gdb--inferior-io-init))))))
 
-;; ----------------------------------------------------------------------
-;; NOTE(nox): Breakpoints buffer
+;; ------------------------------------------------------------------------------------------
+;; Breakpoints buffer
 (defun gdb--breakpoints-init ()
   (gdb--init-buffer "Breakpoints"))
 
@@ -391,8 +303,8 @@ See `gdb--command' for the meaning of CONTEXT."
       (insert (gdb--table-string table " "))
       (gdb--scroll-buffer-to-line (current-buffer) line))))
 
-;; ----------------------------------------------------------------------
-;; NOTE(nox): Threads buffer
+;; ------------------------------------------------------------------------------------------
+;; Threads buffer
 (defun gdb--threads-init ()
   (gdb--init-buffer "Threads"))
 
@@ -445,8 +357,8 @@ See `gdb--command' for the meaning of CONTEXT."
                (and from (concat " of " from))))))
     "No information"))
 
-;; ----------------------------------------------------------------------
-;; NOTE(nox): Frames buffer
+;; ------------------------------------------------------------------------------------------
+;; Frames buffer
 (defun gdb--frames-init ()
   (gdb--init-buffer "Stack frames"))
 
@@ -480,8 +392,8 @@ See `gdb--command' for the meaning of CONTEXT."
     (when (and thread-id frames (eq thread-id (gdb--local gdb--thread-id)))
       (gdb--switch-to-frame 0))))
 
-;; ----------------------------------------------------------------------
-;; NOTE(nox): Disassembly buffer
+;; ------------------------------------------------------------------------------------------
+;; Disassembly buffer
 (defun gdb--disassembly-init ()
   (gdb--init-buffer "Disassembly")
   (set (make-local-variable 'font-lock-defaults)
@@ -593,32 +505,32 @@ See `gdb--command' for the meaning of CONTEXT."
     (setq hex-string (substring hex-string 2))
     (string-to-number hex-string 16)))
 
-;; ----------------------------------------------------------------------
-;; NOTE(nox): Registers buffer
+;; ------------------------------------------------------------------------------------------
+;; Registers buffer
 (defun gdb--registers-init ()
   (gdb--init-buffer "Registers"))
 
 (defun gdb--registers-update ()
   )
 
-;; ----------------------------------------------------------------------
-;; NOTE(nox): Locals buffer
+;; ------------------------------------------------------------------------------------------
+;; Locals buffer
 (defun gdb--locals-init ()
   (gdb--init-buffer "Locals"))
 
 (defun gdb--locals-update ()
   )
 
-;; ----------------------------------------------------------------------
-;; NOTE(nox): Expression watcher buffer
+;; ------------------------------------------------------------------------------------------
+;; Expression watcher buffer
 (defun gdb--expression-watcher-init ()
   (gdb--init-buffer "Expression watcher"))
 
 (defun gdb--expression-watcher-update ()
   )
 
-;; ----------------------------------------------------------------------
-;; NOTE(nox): Utility functions
+;; ------------------------------------------------------------------------------------------
+;; Utility functions
 (defun gdb--init-buffer (buffer-name)
   "Buffer initialization for GDB buffers."
   (kill-all-local-variables)
@@ -900,8 +812,8 @@ DEBUG-SYMBOL may be a symbol or a list of symbols."
          result)
     `(progn ,@body)))
 
-;; ----------------------------------------------------------------------
-;; NOTE(nox): Functions to be called by the dynamic module
+;; ------------------------------------------------------------------------------------------
+;; Functions to be called by the dynamic module
 (defun gdb--extract-context (token-string)
   "Return the context-data cons assigned to TOKEN-STRING, deleting
 it from the list."
@@ -1019,8 +931,7 @@ it from the list."
 (defun gdb--add-frame-to-thread (thread-id level addr func file line from)
   (gdb--local
    (push (cons (string-to-number level)
-               (make-gdb--frame  :addr addr :func func :file file
-                                 :line line :from from))
+               (make-gdb--frame :addr addr :func func :file file :line line :from from))
          (gdb--thread-frames (alist-get (string-to-number thread-id) gdb--threads)))))
 
 (defun gdb--finalize-thread-frames (thread-id)
@@ -1040,8 +951,8 @@ it from the list."
       (setq-local gdb--with-source-info with-source-info))
     (add-to-list 'gdb--buffers-to-update buffer)))
 
-;; ----------------------------------------------------------------------
-;; NOTE(nox): Everything enclosed in here was adapted from gdb-mi.el
+;; ------------------------------------------------------------------------------------------
+;; Everything enclosed in here was adapted from gdb-mi.el
 (defun gdb--escape-argument (string)
   "Return STRING quoted properly as an MI argument.
 The string is enclosed in double quotes.
@@ -1102,8 +1013,8 @@ calling `gdb--table-string'."
       (gdb--table-row-properties table))
      "\n")))
 
-;; ----------------------------------------------------------------------
-;; NOTE(nox): User commands
+;; ------------------------------------------------------------------------------------------
+;; User commands
 ;; TODO(nox): Implement reverse debugging
 ;; TODO(nox): Should we use a toggle like "Instruction mode" where, if set, `gdb-next'
 ;; works instruction-wise or have a separate command `gdb-nexti'?
@@ -1295,41 +1206,9 @@ When called interactively:
                   (gdb--source-buffer
                    (setq gdb--source-buffer nil)))))))))
 
-;;;###autoload
-(defun gdb (arg)
-  "Start GDB in a new frame, or switch to existing GDB session
-TODO(nox): Complete this"
-  (interactive "P")
-  (let* ((this-frame (equal arg '(16)))
-         (stop-or-specify (or this-frame (equal arg '(4)))))
-    (if stop-or-specify (gdb-kill))
-    (let* ((frame (gdb--local gdb--frame))
-           (frame-live (and (not stop-or-specify) (frame-live-p frame)))
-           (gdb-running (and (not stop-or-specify) (gdb--get-comint-process))))
-      (cond ((and gdb-running frame-live)
-             (with-selected-frame frame (gdb--setup-windows)))
-            ((and gdb-running (not frame-live))
-             (gdb-kill)
-             (error "Frame was dead and process was still running - this should never happen."))
-            (t
-             (let* ((debuggee
-                     (or (unless stop-or-specify gdb--last-debuggee)
-                         (and (y-or-n-p "Do you want to debug an executable?")
-                              (expand-file-name (read-file-name
-                                                 "Select file to debug: "
-                                                 nil gdb--last-debuggee t gdb--last-debuggee
-                                                 'file-executable-p)))
-                         ""))
-                    (extra-args (or (unless stop-or-specify gdb--last-args)
-                                    (read-string "Extra arguments: " gdb--last-args))))
-               (setq gdb--last-debuggee debuggee)
-               (setq gdb--last-args extra-args)
-               (if this-frame
-                   (setq frame (selected-frame))
-                 (unless frame-live (setq frame (make-frame '((fullscreen . maximized))))))
-               (add-to-list 'delete-frame-functions 'gdb-kill)
-               (with-selected-frame frame (gdb--setup-windows)))))))
-  (select-frame-set-input-focus (gdb--local gdb--frame)))
+
+
+
 
 (provide 'emacs-gdb)
 ;;; emacs-gdb.el ends here
