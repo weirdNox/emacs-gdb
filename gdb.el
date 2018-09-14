@@ -211,7 +211,20 @@ All embedded quotes, newlines, and backslashes are preceded with a backslash."
                 buffer)))))
 
 (defmacro gdb--rename-buffer (&optional specific-str)
-  `(rename-buffer ,(concat "*GDB" (when specific-str (concat ": " specific-str)) "*") t))
+  `(save-match-data
+     (let ((old-name (buffer-name)))
+       (string-match "[ ]+-[ ]+\\(.+\\)\\*" old-name)
+       (rename-buffer (concat ,(concat "*GDB" (when specific-str (concat ": " specific-str)))
+                              (when (match-string 1 old-name) (concat " - " (match-string 1 old-name)))
+                              "*")
+                      t))))
+
+(defun gdb--rename-buffers-with-debuggee (debuggee-path)
+  (let* ((debuggee-name (file-name-nondirectory debuggee-path))
+         (replacement (concat " - " debuggee-name "*")))
+    (dolist (buffer (gdb--session-buffers (gdb--infer-session)))
+      (with-current-buffer buffer
+        (rename-buffer (replace-regexp-in-string "\\([ ]+-.+\\)?\\*$" replacement (buffer-name) t) t)))))
 
 
 ;; ------------------------------------------------------------------------------------------
@@ -219,7 +232,7 @@ All embedded quotes, newlines, and backslashes are preceded with a backslash."
 (defun gdb--frame-name (&optional debuggee)
   "Return GDB frame name, possibly using DEBUGGEE file name."
   (let ((suffix (and (stringp debuggee) (file-executable-p debuggee)
-                     (concat " - " (file-name-nondirectory debuggee)))))
+                     (concat " - " (abbreviate-file-name debuggee)))))
     (concat "Emacs GDB" suffix)))
 
 (defun gdb--create-frame (session)
@@ -262,8 +275,6 @@ All embedded quotes, newlines, and backslashes are preceded with a backslash."
   (set-process-sentinel (get-buffer-process (current-buffer)) #'gdb--comint-sentinel)
   (setq-local comint-input-sender #'gdb--comint-sender)
   (setq-local comint-preoutput-filter-functions '(gdb--output-filter))
-
-  (setq-local mode-line-process '(":%s"))
 
   (setq-local comint-prompt-read-only nil)
   (setq-local comint-use-prompt-regexp t)
@@ -440,7 +451,8 @@ it from the list."
 
     (with-selected-frame (gdb--session-frame session)
       (gdb--command (concat "-file-exec-and-symbols " debuggee-path) 'gdb--context-ignore)
-      (set-frame-parameter nil 'name (gdb--frame-name debuggee-path)))))
+      (set-frame-parameter nil 'name (gdb--frame-name debuggee-path))
+      (gdb--rename-buffers-with-debuggee debuggee-path))))
 
 (provide 'gdb)
 ;;; gdb.el ends here
