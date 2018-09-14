@@ -197,7 +197,7 @@ All embedded quotes, newlines, and backslashes are preceded with a backslash."
 
 (defmacro gdb--simple-get-buffer (type update-func &rest body)
   "Simple buffer creator/fetcher, for buffers that should be unique in a session."
-  (declare (indent defun) (debug (sexp body)))
+  (declare (indent defun) (debug (sexp sexp body)))
   (unless (memq type gdb--buffer-types) (error "Type %s does not exist" (symbol-name type)))
   `(defun ,(intern (concat (symbol-name type) "-get-buffer")) (session)
      ,(concat "Creator and fetcher of buffer with type `" (symbol-name type) "'")
@@ -377,6 +377,67 @@ CONTEXT-TYPE must be a member of `gdb--available-contexts'."
     (let ((buffer (process-buffer process)))
       (delete-process process)
       (when buffer (gdb--inferior-io-initialization buffer)))))
+
+
+;; ------------------------------------------------------------------------------------------
+;; Threads buffer
+(define-derived-mode gdb--threads-mode nil "GDB Threads"
+  (setq-local buffer-read-only t)
+  (buffer-disable-undo))
+
+(gdb--simple-get-buffer gdb--threads gdb--threads-update
+  (gdb--rename-buffer "Threads")
+  (gdb--threads-mode))
+
+;; IMPORTANT TODO
+(defun gdb--threads-update ()
+  (let ((threads (gdb--local gdb--threads))
+        (table (make-gdb--table))
+        (count 1)
+        (current-thread (gdb--local gdb--thread-id))
+        current-thread-line)
+    (gdb--table-add-row table '("ID" "TgtID" "Name" "State" "Core" "Frame"))
+    (dolist (thread-cons threads)
+      (let* ((id (car thread-cons))
+             (id-str (int-to-string id))
+             (thread (cdr thread-cons))
+             (target-id (gdb--thread-target-id thread))
+             (name (gdb--thread-name thread))
+             (state (gdb--thread-state thread))
+             (state-display
+              (if (string= state "running")
+                  (eval-when-compile (propertize "running" 'font-lock-face font-lock-string-face))
+                (eval-when-compile (propertize "stopped" 'font-lock-face font-lock-warning-face))))
+             (core (gdb--thread-core thread))
+             (frame (gdb--threads-frame-string (car (gdb--thread-frames thread)))))
+        (gdb--table-add-row table (list id-str target-id name state-display core frame)
+                            `(gdb--thread-id ,id))
+        (setq count (1+ count))
+        (when (eq current-thread id) (setq current-thread-line count))))
+    (let ((line (gdb--current-line)))
+      (erase-buffer)
+      (insert (gdb--table-string table " "))
+      (gdb--scroll-buffer-to-line (current-buffer) line))
+    (remove-overlays nil nil 'gdb--thread-indicator t)
+    (when current-thread-line
+      (gdb--place-symbol (current-buffer) current-thread-line '((type . thread-indicator))))))
+
+(defun gdb--threads-frame-string (frame)
+  (if frame
+      (progn
+        (setq frame (cdr frame))
+        (let ((addr (gdb--frame-addr frame))
+              (func (gdb--frame-func frame))
+              (file (gdb--frame-file frame))
+              (line (gdb--frame-line frame))
+              (from (gdb--frame-from frame)))
+          (when file (setq file (file-name-nondirectory file)))
+          (concat
+           "in " (propertize (or func "???") 'font-lock-face font-lock-function-name-face)
+           " at " addr
+           (or (and file line (concat " of " file ":" line))
+               (and from (concat " of " from))))))
+    "No information"))
 
 
 ;; ------------------------------------------------------------------------------------------
