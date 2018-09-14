@@ -69,8 +69,8 @@ dynamic module.")
 (defconst gdb--keep-buffer-types '(gdb--comint gdb--inferior-io)
   "List of buffer types that should be kept after GDB is killed.")
 
-(cl-defstruct gdb--frame thread-id addr func file line from)
-(cl-defstruct gdb--thread target-id name state core frames)
+(cl-defstruct gdb--thread id target-id name state frames core)
+(cl-defstruct gdb--frame thread addr func file line from)
 
 (cl-defstruct gdb--breakpoint type disp enabled addr hits what file line)
 (defconst gdb--available-breakpoint-types
@@ -85,7 +85,8 @@ breakpoint of TYPE.")
 (cl-defstruct gdb--session
   frame process buffers source-window
   (buffer-types-to-update gdb--buffer-types) buffers-to-update
-  current-frame threads breakpoints)
+  threads current-frame
+  breakpoints)
 (defvar gdb--sessions nil
   "List of active sessions.")
 
@@ -108,11 +109,12 @@ This is shared among all sessions.")
 
 ;; ------------------------------------------------------------------------------------------
 ;; Session management
-(defsubst gdb--infer-session ()
+(defsubst gdb--infer-session (&optional only-from-buffer)
   (or (and (gdb--buffer-info-p gdb--buffer-info)
            (gdb--session-p (gdb--buffer-info-session gdb--buffer-info))
            (gdb--buffer-info-session gdb--buffer-info))
-      (and (gdb--session-p (frame-parameter nil 'gdb--session))
+      (and (not only-from-buffer)
+           (gdb--session-p (frame-parameter nil 'gdb--session))
            (frame-parameter nil 'gdb--session))))
 
 (defun gdb--valid-session (session)
@@ -121,7 +123,7 @@ This is shared among all sessions.")
     (if (and (frame-live-p (gdb--session-frame session))
              (process-live-p (gdb--session-process session)))
         t
-      (gdb-kill-session session)
+      (gdb--kill-session session)
       nil)))
 
 (defmacro gdb--with-valid-session (&rest body)
@@ -132,6 +134,26 @@ This is shared among all sessions.")
      (if (gdb--valid-session session)
          (progn ,@body)
        ,(when message `(error "%s" ,message))))))
+
+(defun gdb--kill-session (session)
+  (when (and (gdb--session-p session) (memq session gdb--sessions))
+    (setq gdb--sessions (delq session gdb--sessions))
+    (when (= (length gdb--sessions) 0) (remove-hook 'delete-frame-functions #'gdb--handle-delete-frame))
+
+    (when (frame-live-p (gdb--session-frame session))
+      (set-frame-parameter (gdb--session-frame session) 'gdb--session nil)
+      (when (> (length (frame-list)) 0)
+        (delete-frame (gdb--session-frame session))))
+
+    (delete-process (gdb--session-process session))
+    (dolist (buffer (gdb--session-buffers session))
+      (when (buffer-live-p buffer)
+        (with-current-buffer buffer
+          (let ((type (gdb--buffer-info-type gdb--buffer-info)))
+            (when (eq type 'gdb--inferior-io) (delete-process (get-buffer-process buffer)))
+            (if (memq type gdb--keep-buffer-types)
+                (setq gdb--buffer-info nil)
+              (kill-buffer))))))))
 
 (defun gdb--update-buffer (buffer)
   (with-current-buffer buffer
@@ -186,6 +208,59 @@ All embedded quotes, newlines, and backslashes are preceded with a backslash."
          result)
      (progn ,@body)))
 
+(defsubst gdb--current-line () (string-to-number (format-mode-line "%l")))
+
+
+;; ------------------------------------------------------------------------------------------
+;; Tables
+(defsubst gdb--pad-string (string padding) (format (concat "%" (number-to-string padding) "s") string))
+
+(cl-defstruct gdb--table
+  (column-sizes nil)
+  (rows nil)
+  (row-properties nil)
+  (right-align nil))
+
+(defun gdb--table-add-row (table row &optional properties)
+  "Add ROW, a list of strings, to TABLE and recalculate column sizes.
+When non-nil, PROPERTIES will be added to the whole row when
+calling `gdb--table-string'."
+  (let ((rows (gdb--table-rows table))
+        (row-properties (gdb--table-row-properties table))
+        (column-sizes (gdb--table-column-sizes table))
+        (right-align (gdb--table-right-align table)))
+    (when (not column-sizes)
+      (setf (gdb--table-column-sizes table)
+            (make-list (length row) 0)))
+    (setf (gdb--table-rows table)
+          (append rows (list row)))
+    (setf (gdb--table-row-properties table)
+          (append row-properties (list properties)))
+    (setf (gdb--table-column-sizes table)
+          (cl-mapcar (lambda (x s)
+                       (let ((new-x
+                              (max (abs x) (string-width (or s "")))))
+                         (if right-align new-x (- new-x))))
+                     (gdb--table-column-sizes table)
+                     row))
+    ;; Avoid trailing whitespace at eol
+    (if (not (gdb--table-right-align table))
+        (setcar (last (gdb--table-column-sizes table)) 0))))
+
+(defun gdb--table-string (table &optional sep)
+  "Return TABLE as a string with columns separated with SEP."
+  (let ((column-sizes (gdb--table-column-sizes table)))
+    (mapconcat
+     'identity
+     (cl-mapcar
+      (lambda (row properties)
+        (apply 'propertize
+               (mapconcat 'identity (cl-mapcar (lambda (s x) (gdb--pad-string s x)) row column-sizes) sep)
+               properties))
+      (gdb--table-rows table)
+      (gdb--table-row-properties table))
+     "\n")))
+
 
 ;; ------------------------------------------------------------------------------------------
 ;; Buffers
@@ -213,7 +288,7 @@ All embedded quotes, newlines, and backslashes are preceded with a backslash."
 (defmacro gdb--rename-buffer (&optional specific-str)
   `(save-match-data
      (let ((old-name (buffer-name)))
-       (string-match "[ ]+-[ ]+\\(.+\\)\\*" old-name)
+       (string-match "[ ]+-[ ]+\\(.+\\)\\*\\(<[0-9]+>\\)?$" old-name)
        (rename-buffer (concat ,(concat "*GDB" (when specific-str (concat ": " specific-str)))
                               (when (match-string 1 old-name) (concat " - " (match-string 1 old-name)))
                               "*")
@@ -224,7 +299,11 @@ All embedded quotes, newlines, and backslashes are preceded with a backslash."
          (replacement (concat " - " debuggee-name "*")))
     (dolist (buffer (gdb--session-buffers (gdb--infer-session)))
       (with-current-buffer buffer
-        (rename-buffer (replace-regexp-in-string "\\([ ]+-.+\\)?\\*$" replacement (buffer-name) t) t)))))
+        (rename-buffer (replace-regexp-in-string "\\([ ]+-.+\\)?\\*\\(<[0-9]+>\\)?$"
+                                                 replacement (buffer-name) t)
+                       t)))))
+
+(defun gdb--important-buffer-kill-cleanup () (gdb--kill-session (gdb--infer-session t)))
 
 
 ;; ------------------------------------------------------------------------------------------
@@ -244,9 +323,8 @@ All embedded quotes, newlines, and backslashes are preceded with a backslash."
     frame))
 
 (defun gdb--handle-delete-frame (frame)
-  (cl-loop for session in gdb--sessions
-           when (eq (gdb--session-frame session) frame)
-           return (gdb-kill-session session)))
+  (let ((session (frame-parameter frame 'gdb--session)))
+    (when (gdb--session-p session) (gdb--kill-session session))))
 
 (defun gdb--set-window-buffer (window buffer)
   (set-window-dedicated-p window nil)
@@ -267,6 +345,13 @@ All embedded quotes, newlines, and backslashes are preceded with a backslash."
       (gdb--set-window-buffer middle-right (gdb--inferior-io-get-buffer session))
       (setf (gdb--session-source-window session) middle-left))))
 
+(defun gdb--scroll-buffer-to-line (buffer line)
+  (let ((windows (get-buffer-window-list buffer nil t)))
+    (dolist (window windows)
+      (with-selected-window window
+        (goto-char (point-min))
+        (forward-line (1- line))))))
+
 
 ;; ------------------------------------------------------------------------------------------
 ;; Comint buffer
@@ -283,12 +368,12 @@ All embedded quotes, newlines, and backslashes are preceded with a backslash."
   (setq-local paragraph-separate "\\'")
   (setq-local paragraph-start comint-prompt-regexp))
 
-;; NOTE(nox): This buffer doesn't need a kill hook because it has a process sentinel
 (gdb--simple-get-buffer gdb--comint ignore
   (gdb--rename-buffer "Comint")
   (make-comint-in-buffer "GDB" buffer "gdb" nil "-i=mi" "-nx")
   (gdb-comint-mode)
-  (setf (gdb--session-process session) (get-buffer-process buffer)))
+  (setf (gdb--session-process session) (get-buffer-process buffer))
+  (add-hook 'kill-buffer-hook #'gdb--important-buffer-kill-cleanup nil t))
 
 (defun gdb--comint-sender (process string)
   "Send user commands from comint."
@@ -305,11 +390,14 @@ All embedded quotes, newlines, and backslashes are preceded with a backslash."
       (message "--------------------"))
     output))
 
-(defun gdb--comint-sentinel (process _)
+(defun gdb--comint-sentinel (process str)
   "Handle GDB comint process state changes."
-  (when (or (not (buffer-name (process-buffer process)))
-            (eq (process-status process) 'exit))
-    (gdb-kill-session)))
+  (let* ((buffer (process-buffer process)))
+    (when (and (or (eq (process-status process) 'exit)
+                   (string= str "killed\n"))
+               buffer)
+      (with-current-buffer buffer
+        (gdb--kill-session (gdb--infer-session t))))))
 
 (defun gdb--command (command &optional context force-stopped)
   "Execute GDB COMMAND.
@@ -366,17 +454,18 @@ CONTEXT-TYPE must be a member of `gdb--available-contexts'."
                   (process-tty-name inferior-process))))
     (gdb--command (concat "-inferior-tty-set " tty) 'gdb--context-ignore)
     (set-process-sentinel inferior-process #'gdb--inferior-io-sentinel)
-    (add-hook 'kill-buffer-hook #'gdb--inferior-io-killed nil t)))
-
-(defun gdb--inferior-io-killed () (gdb-kill-session))
+    (add-hook 'kill-buffer-hook #'gdb--important-buffer-kill-cleanup nil t)))
 
 ;; NOTE(nox): When the debuggee exits, Emacs gets an EIO error and stops listening to the
 ;; tty. This re-inits the buffer so everything works fine!
-(defun gdb--inferior-io-sentinel (process _str)
-  (when (eq (process-status process) 'failed)
-    (let ((buffer (process-buffer process)))
-      (delete-process process)
-      (when buffer (gdb--inferior-io-initialization buffer)))))
+(defun gdb--inferior-io-sentinel (process str)
+  (let ((process-status (process-status process))
+        (buffer (process-buffer process)))
+    (cond ((eq process-status 'failed)
+           (delete-process process)
+           (when buffer (gdb--inferior-io-initialization buffer)))
+          ((and (string= str "killed\n") buffer)
+           (with-current-buffer buffer (gdb--kill-session (gdb--infer-session t)))))))
 
 
 ;; ------------------------------------------------------------------------------------------
@@ -389,55 +478,51 @@ CONTEXT-TYPE must be a member of `gdb--available-contexts'."
   (gdb--rename-buffer "Threads")
   (gdb--threads-mode))
 
-;; IMPORTANT TODO
 (defun gdb--threads-update ()
-  (let ((threads (gdb--local gdb--threads))
-        (table (make-gdb--table))
-        (count 1)
-        (current-thread (gdb--local gdb--thread-id))
-        current-thread-line)
-    (gdb--table-add-row table '("ID" "TgtID" "Name" "State" "Core" "Frame"))
-    (dolist (thread-cons threads)
-      (let* ((id (car thread-cons))
-             (id-str (int-to-string id))
-             (thread (cdr thread-cons))
+  (gdb--with-valid-session
+   (let ((threads (gdb--session-threads session))
+         (current-thread (gdb--frame-thread (gdb--session-current-frame session)))
+         (cursor-on-thread (get-text-property (point) 'gdb--thread))
+         (cursor-on-line (gdb--current-line))
+         (table (make-gdb--table))
+         (count 1) current-thread-line)
+     (gdb--table-add-row table '("ID" "TgtID" "Name" "State" "Core" "Frame"))
+     (dolist (thread threads)
+       (let ((id-str (number-to-string (gdb--thread-id thread)))
              (target-id (gdb--thread-target-id thread))
              (name (gdb--thread-name thread))
-             (state (gdb--thread-state thread))
              (state-display
-              (if (string= state "running")
+              (if (string= (gdb--thread-state thread) "running")
                   (eval-when-compile (propertize "running" 'font-lock-face font-lock-string-face))
                 (eval-when-compile (propertize "stopped" 'font-lock-face font-lock-warning-face))))
-             (core (gdb--thread-core thread))
-             (frame (gdb--threads-frame-string (car (gdb--thread-frames thread)))))
-        (gdb--table-add-row table (list id-str target-id name state-display core frame)
-                            `(gdb--thread-id ,id))
-        (setq count (1+ count))
-        (when (eq current-thread id) (setq current-thread-line count))))
-    (let ((line (gdb--current-line)))
-      (erase-buffer)
-      (insert (gdb--table-string table " "))
-      (gdb--scroll-buffer-to-line (current-buffer) line))
-    (remove-overlays nil nil 'gdb--thread-indicator t)
-    (when current-thread-line
-      (gdb--place-symbol (current-buffer) current-thread-line '((type . thread-indicator))))))
+             (frame (gdb--threads-frame-string (car (gdb--thread-frames thread))))
+             (core (gdb--thread-core thread)))
+         (gdb--table-add-row table (list id-str target-id name state-display core frame) `(gdb--thread ,thread))
+         (setq count (1+ count))
+         (when (eq current-thread thread) (setq current-thread-line count))
+         (when (eq cursor-on-thread thread) (setq cursor-on-line count))))
+
+     (erase-buffer)
+     (insert (gdb--table-string table " "))
+     (gdb--scroll-buffer-to-line (current-buffer) cursor-on-line)
+
+     (remove-overlays nil nil 'gdb--thread-indicator t)
+     (when current-thread-line
+       (gdb--place-symbol (current-buffer) current-thread-line '((type . thread-indicator)))))))
 
 (defun gdb--threads-frame-string (frame)
-  (if frame
-      (progn
-        (setq frame (cdr frame))
-        (let ((addr (gdb--frame-addr frame))
-              (func (gdb--frame-func frame))
-              (file (gdb--frame-file frame))
-              (line (gdb--frame-line frame))
-              (from (gdb--frame-from frame)))
-          (when file (setq file (file-name-nondirectory file)))
-          (concat
-           "in " (propertize (or func "???") 'font-lock-face font-lock-function-name-face)
-           " at " addr
-           (or (and file line (concat " of " file ":" line))
-               (and from (concat " of " from))))))
-    "No information"))
+  (cond
+   (frame
+    (let ((addr (gdb--frame-addr frame))
+          (func (gdb--frame-func frame))
+          (file (gdb--frame-file frame))
+          (line (gdb--frame-line frame))
+          (from (gdb--frame-from frame)))
+      (when file (setq file (file-name-nondirectory file)))
+      (concat "in " (propertize (or func "???") 'font-lock-face font-lock-function-name-face) " at " addr
+              (or (and file line (concat " of " file ":" line))
+                  (and from (concat " of " from))))))
+   (t "No information")))
 
 
 ;; ------------------------------------------------------------------------------------------
@@ -469,7 +554,7 @@ Create the buffer, if it wasn't already open."
 
 ;; ------------------------------------------------------------------------------------------
 ;; Fringe symbols
-(defun gdb--place-symbol (_buffer _line _data)
+(defun gdb--place-symbol (_buffer _line _data) ;; TODO
   ;; (when (and buffer line data)
   ;;   (with-current-buffer buffer
   ;;     (let* ((type (alist-get 'type data))
@@ -531,25 +616,10 @@ it from the list."
 
 ;; ------------------------------------------------------------------------------------------
 ;; User commands
-(defun gdb-kill-session (&optional session)
+(defun gdb-kill-session ()
+  "Kill current GDB session."
   (interactive)
-  (setq session (or (and (gdb--session-p session) session) (gdb--infer-session)))
-  (unless session (user-error "No session in the current context."))
-
-  (setq gdb--sessions (delq session gdb--sessions))
-  (when (= (length gdb--sessions) 0) (remove-hook 'delete-frame-functions #'gdb--handle-delete-frame))
-
-  (when (frame-live-p (gdb--session-frame session)) (delete-frame (gdb--session-frame session)))
-
-  (cl-loop for buffer in (gdb--session-buffers session)
-           do (when (buffer-live-p buffer)
-                (with-current-buffer buffer
-                  (let ((type (gdb--buffer-info-type gdb--buffer-info)))
-                    (setq gdb--buffer-info nil)
-                    (when (eq type 'gdb--inferior-io) (delete-process (get-buffer-process buffer)))
-                    (unless (memq type gdb--keep-buffer-types) (kill-buffer))))))
-
-  (delete-process (gdb--session-process session)))
+  (gdb--kill-session (gdb--infer-session)))
 
 ;;;###autoload
 (defun gdb-create-session ()
