@@ -259,9 +259,9 @@ All embedded quotes, newlines, and backslashes are preceded with a backslash."
     (let* ((top-left (selected-window))
            (middle-left (split-window))
            (bottom-left (split-window middle-left))
-           (top-right (split-window top-left nil t))
+           (_top-right (split-window top-left nil t))
            (middle-right (split-window middle-left nil t))
-           (bottom-right (split-window bottom-left nil t)))
+           (_bottom-right (split-window bottom-left nil t)))
       (balance-windows)
       (gdb--set-window-buffer top-left (gdb--comint-get-buffer session))
       (gdb--set-window-buffer middle-right (gdb--inferior-io-get-buffer session))
@@ -380,6 +380,71 @@ CONTEXT-TYPE must be a member of `gdb--available-contexts'."
 
 
 ;; ------------------------------------------------------------------------------------------
+;; Source buffers
+(defun gdb--find-file (path)
+  "Return the buffer of the file specified by PATH.
+Create the buffer, if it wasn't already open."
+  (when (and path (not (file-directory-p path)) (file-readable-p path))
+    (find-file-noselect path t)))
+
+(defun gdb--display-source-buffer (file line &optional no-mark)
+  "Display buffer of the selected source."
+  (gdb--with-valid-session
+   (let ((buffer (gdb--find-file file))
+         (window (gdb--session-source-window session)))
+     (gdb--remove-all-symbols 'gdb--source-indicator t)
+     (unless no-mark (gdb--place-symbol buffer line '((type . source-indicator))))
+
+     (when (and (window-live-p window) buffer)
+       (with-selected-window window
+         (switch-to-buffer buffer)
+         (if (display-images-p)
+             (set-window-fringes nil 8)
+           (set-window-margins nil 2))
+         (goto-char (point-min))
+         (forward-line (1- line))
+         (recenter 3))))))
+
+
+;; ------------------------------------------------------------------------------------------
+;; Fringe symbols
+(defun gdb--place-symbol (_buffer _line _data)
+  ;; (when (and buffer line data)
+  ;;   (with-current-buffer buffer
+  ;;     (let* ((type (alist-get 'type data))
+  ;;            (pos (line-beginning-position (1+ (- line (line-number-at-pos)))))
+  ;;            (overlay (make-overlay pos pos buffer))
+  ;;            (dummy-string (make-string 1 ?x))
+  ;;            property)
+  ;;       (overlay-put overlay 'gdb--indicator t)
+  ;;       (overlay-put overlay (intern (concat "gdb--" (symbol-name type))) t)
+  ;;       (cond ((eq type 'breakpoint-indicator)
+  ;;              (let ((number (alist-get 'number data))
+  ;;                    (enabled (alist-get 'enabled data)))
+  ;;                (overlay-put overlay 'gdb--breakpoint-number number)
+  ;;                (if (display-images-p)
+  ;;                    (setq property `(left-fringe gdb--breakpoint ,(if enabled
+  ;;                                                                      'gdb--breakpoint-enabled
+  ;;                                                                    'gdb--breakpoint-disabled)))
+  ;;                  (setq property `((margin left-margin) ,(if enabled "B" "b"))))))
+  ;;             ((memq type '(source-indicator frame-indicator thread-indicator))
+  ;;              (if (display-images-p)
+  ;;                  (setq property '(left-fringe right-triangle))
+  ;;                (setq property '((margin left-margin) "=>")))))
+  ;;       (when (alist-get 'source data)
+  ;;         (overlay-put overlay 'window (gdb--local gdb--source-window)))
+  ;;       (put-text-property 0 1 'display property dummy-string)
+  ;;       (overlay-put overlay 'before-string dummy-string))))
+  )
+
+(defun gdb--remove-all-symbols (type &optional source-files-only)
+  (dolist (buffer (buffer-list))
+    (with-current-buffer buffer
+      (unless (and source-files-only gdb--buffer-info)
+        (remove-overlays nil nil type t)))))
+
+
+;; ------------------------------------------------------------------------------------------
 ;; Module API
 (defun gdb--extract-context (token-string)
   "Return the context-data cons assigned to TOKEN-STRING, deleting
@@ -398,6 +463,10 @@ it from the list."
                      else do (setq result (1+ result))
                      finally return 0)
             data))))
+
+(defun gdb--set-initial-file (file line-string)
+   (gdb--display-source-buffer file (string-to-number line-string) t))
+
 
 ;; ------------------------------------------------------------------------------------------
 ;; User commands
@@ -451,6 +520,7 @@ it from the list."
 
     (with-selected-frame (gdb--session-frame session)
       (gdb--command (concat "-file-exec-and-symbols " debuggee-path) 'gdb--context-ignore)
+      (gdb--command "-file-list-exec-source-file" 'gdb--context-initial-file)
       (set-frame-parameter nil 'name (gdb--frame-name debuggee-path))
       (gdb--rename-buffers-with-debuggee debuggee-path))))
 
