@@ -266,10 +266,10 @@ static void FrameInfo(emacs_env *Env, mi_result *Result, emacs_value ThreadId) {
         char *Values[ArrayCount(Variables)] = {};
         GetBatchResultString(FrameContents, Variables, Values, ArrayCount(Variables));
 
-        emacs_value Arguments[1 + ArrayCount(Variables)];
-        Arguments[0] = ThreadId;
-        GetEmacsStrings(Env, Values, Arguments + 1, ArrayCount(Variables), false);
-        Funcall(Env, "gdb--add-frame-to-thread", ArrayCount(Arguments), Arguments);
+        emacs_value Args[1 + ArrayCount(Variables)];
+        Args[0] = ThreadId;
+        GetEmacsStrings(Env, Values, Args+1, ArrayCount(Variables), false);
+        Funcall(Env, "gdb--add-frame-to-thread", ArrayCount(Args), Args);
     }
 
     Funcall(Env, "gdb--finalize-thread-frames", 1, &ThreadId);
@@ -362,21 +362,15 @@ static void miAsyncStopped(emacs_env *Env, mi_result *Result, string *PrintStrin
             if(Iter->kind == GDBWIRE_MI_CSTRING) {
                 Funcall(Env, ThreadInfoFunc, 0, 0);
             } else {
-                for(mi_result *Thread = Iter->variant.result; Thread; Thread = Thread->next)
-                {
-                    emacs_value Argument =
-                        GetEmacsString(Env, Thread->variant.cstring);
-                    Funcall(Env, ThreadInfoFunc, 1, &Argument);
+                for(mi_result *Thread = Iter->variant.result; Thread; Thread = Thread->next) {
+                    emacs_value Arg = GetEmacsString(Env, Thread->variant.cstring);
+                    Funcall(Env, ThreadInfoFunc, 1, &Arg);
                 }
             }
 
             break;
         }
     }
-
-    char *ThreadId = GetResultString(Result, "thread-id");
-    emacs_value Argument = GetEmacsString(Env, ThreadId);
-    Funcall(Env, "gdb--stopped", 1, &Argument);
 
     // NOTE(nox): *stopped does not end with a prompt...
     PushString(PrintString, "(gdb) ");
