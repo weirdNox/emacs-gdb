@@ -2,16 +2,16 @@
 #include "emacs-module.h"
 #include "gdbwire.c"
 
-#define ArrayCount(Array) (sizeof(Array) / sizeof(*(Array)))
+#define arrayCount(Array) (sizeof(Array) / sizeof(*(Array)))
 
-#define InvalidCodePath assert(0)
-#define InvalidDefaultCase default: { InvalidCodePath(); } break
-#define IgnoreCase(Case) case (Case): break
-#define IgnoreDefaultCase default: break
+#define invalidCodePath() assert(0)
+#define invalidDefaultCase() default: { invalidCodePath(); } break
+#define ignoreCase(Case) case (Case): break
+#define ignoreDefaultCase() default: break
 
-#define WriteVariableKey(Key, Name, ...) Variable_##Key
-#define WriteVariableName(Key, Name, ...) #Name
-#define WriteElispStructKey(Key, Name, Elisp) Intern(Env, ":" #Elisp)
+#define writeVariableKey(Key, Name, ...) Variable_##Key
+#define writeVariableName(Key, Name, ...) #Name
+#define writeElispStructKey(Key, Name, Elisp) intern(Env, ":" #Elisp)
 
 typedef uint8_t  u8;
 typedef uint16_t u16;
@@ -35,6 +35,27 @@ typedef struct gdbwire_mi_parser_callbacks gdbwire_callbacks;
 
 
 u32 plugin_is_GPL_compatible;
+
+#define apiFunctionsWriter(W) W(ExtractContext, gdb--extract-context)   \
+        W(SetInitialFile, gdb--set-initial-file)                        \
+        W(RunningFunc, gdb--running)                                    \
+        W(GetThreadInfo, gdb--get-thread-info)                          \
+        W(UpdateThread, gdb--update-thread)                             \
+        W(ClearThreadFrames, gdb--clear-thread-frames)                  \
+        W(AddFrameToThread, gdb--add-frame-to-thread)                   \
+        W(FinalizeThreadFrames, gdb--finalize-thread-frames)            \
+        W(ThreadExited, gdb--thread-exited)                             \
+        W(BreakpointChanged, gdb--breakpoint-changed)                   \
+        W(BreakpointDeleted, gdb--breakpoint-deleted)                   \
+        W(SetDisassembly, gdb--set-disassembly)                         \
+        W(MakeInstruction, make-gdb--instruction)                       \
+        W(MakeSourceInfo, make-gdb--source-instr-info)
+    ; // Weird indentation...
+
+#define apiFunctionVariableWriter(Name, ...) static emacs_value Name;
+#define apiFunctionInternWriter(Name, ElispName) Name = intern(Env, #ElispName);
+
+apiFunctionsWriter(apiFunctionVariableWriter);
 
 static emacs_value Nil;
 static emacs_value T;
@@ -66,7 +87,7 @@ typedef struct string {
     size_t Cap;
 } string;
 
-static string AllocateString() {
+static string allocateString() {
     string Result = {
         .Cap = 1<<13
     };
@@ -74,7 +95,7 @@ static string AllocateString() {
     return Result;
 }
 
-static void PushString(string *Str, char *Format, ...) {
+static void pushString(string *Str, char *Format, ...) {
     if(Str && Str->Contents && Format) {
         va_list Args;
         va_start(Args, Format);
@@ -96,14 +117,14 @@ static void PushString(string *Str, char *Format, ...) {
     }
 }
 
-static void FreeString(string *Str) {
+static void freeString(string *Str) {
     if(Str && Str->Contents) {
         free(Str->Contents);
         *Str = (string){};
     }
 }
 
-static void GdbWireCallback(void *Ctx, mi_output *Output) {
+static void gdbWireCallback(void *Ctx, mi_output *Output) {
     mi_output **WriteTo = &ParserOutput;
     while(*WriteTo) {
         WriteTo = &(*WriteTo)->next;
@@ -111,7 +132,7 @@ static void GdbWireCallback(void *Ctx, mi_output *Output) {
     *WriteTo = Output;
 }
 
-static void *GetResultVariable_(mi_result *Result, char *Variable,
+static void *getResultVariable_(mi_result *Result, char *Variable,
                                 enum gdbwire_mi_result_kind Kind) {
     void *ToReturn = 0;
     if(Result && Variable) {
@@ -125,14 +146,14 @@ static void *GetResultVariable_(mi_result *Result, char *Variable,
     return ToReturn;
 }
 
-#define GetResultTuple(Result, Variable)                                \
-    (mi_result *)GetResultVariable_(Result, Variable, GDBWIRE_MI_TUPLE)
-#define GetResultList(Result, Variable)                                 \
-    (mi_result *)GetResultVariable_(Result, Variable, GDBWIRE_MI_LIST)
-#define GetResultString(Result, Variable)                               \
-    (char *)GetResultVariable_(Result, Variable, GDBWIRE_MI_CSTRING)
+#define getResultTuple(Result, Variable)                                \
+    (mi_result *)getResultVariable_(Result, Variable, GDBWIRE_MI_TUPLE)
+#define getResultList(Result, Variable)                                 \
+    (mi_result *)getResultVariable_(Result, Variable, GDBWIRE_MI_LIST)
+#define getResultString(Result, Variable)                               \
+    (char *)getResultVariable_(Result, Variable, GDBWIRE_MI_CSTRING)
 
-static void GetBatchResultString(mi_result *Result, char *Variables[], char *Values[],
+static void getBatchResultString(mi_result *Result, char *Variables[], char *Values[],
                                  u32 NumberOfVariables) {
     if(Result && Variables && Values) {
         u32 StartAt = 0;
@@ -153,7 +174,7 @@ static void GetBatchResultString(mi_result *Result, char *Variables[], char *Val
     }
 }
 
-static inline emacs_value GetEmacsString_(emacs_env *Env, char *String, bool EmptyIfNull) {
+static inline emacs_value getEmacsString_(emacs_env *Env, char *String, bool EmptyIfNull) {
     emacs_value Result = Nil;
 
     if(!String && EmptyIfNull) {
@@ -166,35 +187,35 @@ static inline emacs_value GetEmacsString_(emacs_env *Env, char *String, bool Emp
 
     return Result;
 }
-#define GetEmacsString(Env, String) GetEmacsString_(Env, String, false)
-#define GetEmacsStringEmpty(Env, String) GetEmacsString_(Env, String, true)
+#define getEmacsString(Env, String) getEmacsString_(Env, String, false)
+#define getEmacsStringEmpty(Env, String) getEmacsString_(Env, String, true)
 
-static inline void GetEmacsStrings(emacs_env *Env, char *Vals[], emacs_value EmacsVals[], u32 Size,
+static inline void getEmacsStrings(emacs_env *Env, char *Vals[], emacs_value EmacsVals[], u32 Size,
                                    bool EmptyIfNull) {
     if(Vals && EmacsVals) {
         for(int Index = 0; Index < Size; ++Index) {
-            EmacsVals[Index] = GetEmacsString_(Env, Vals[Index], EmptyIfNull);
+            EmacsVals[Index] = getEmacsString_(Env, Vals[Index], EmptyIfNull);
         }
     }
 }
 
-static inline emacs_value Intern(emacs_env *Env, char *SymName) {
+static inline emacs_value intern(emacs_env *Env, char *SymName) {
     emacs_value Result = Env->intern(Env, SymName);
     return Result;
 }
 
-static inline emacs_value Funcall(emacs_env *Env, char *Func, u32 NumArgs, emacs_value *Args) {
-    emacs_value Result = Env->funcall(Env, Intern(Env, Func), NumArgs, Args);
-    return Result;
-}
-
-static inline emacs_value FuncallInterned(emacs_env *Env, emacs_value Func, u32 NumArgs, emacs_value *Args) {
+static inline emacs_value funcall(emacs_env *Env, emacs_value Func, u32 NumArgs, emacs_value *Args) {
     emacs_value Result = Env->funcall(Env, Func, NumArgs, Args);
     return Result;
 }
 
-static void BreakpointChange(emacs_env *Env, mi_result *Breakpoint) {
-#define BreakpointVariablesWriter(W) W(Number, number), \
+static inline emacs_value internFuncall(emacs_env *Env, char *Func, u32 NumArgs, emacs_value *Args) {
+    emacs_value Result = Env->funcall(Env, intern(Env, Func), NumArgs, Args);
+    return Result;
+}
+
+static void breakpointChange(emacs_env *Env, mi_result *Breakpoint) {
+#define breakpointVariablesWriter(W) W(Number, number), \
         W(Type, type),                                  \
         W(Disposition, disp),                           \
         W(Enabled, enabled),                            \
@@ -209,140 +230,137 @@ static void BreakpointChange(emacs_env *Env, mi_result *Breakpoint) {
         W(Times, times),                                \
         W(What, what)
 
-    enum { BreakpointVariablesWriter(WriteVariableKey) };
+    enum { breakpointVariablesWriter(writeVariableKey) };
 
-    char *Variables[] = { BreakpointVariablesWriter(WriteVariableName) };
-    char *Values[ArrayCount(Variables)] = {};
-    GetBatchResultString(Breakpoint, Variables, Values, ArrayCount(Variables));
+    char *Variables[] = { breakpointVariablesWriter(writeVariableName) };
+    char *Values[arrayCount(Variables)] = {};
+    getBatchResultString(Breakpoint, Variables, Values, arrayCount(Variables));
 
-    emacs_value Arguments[ArrayCount(Variables)];
-    GetEmacsStrings(Env, Values, Arguments, ArrayCount(Variables), false);
-    Funcall(Env, "gdb--breakpoint-changed", ArrayCount(Arguments), Arguments);
+    emacs_value Args[arrayCount(Variables)];
+    getEmacsStrings(Env, Values, Args, arrayCount(Variables), false);
+    funcall(Env, BreakpointChanged, arrayCount(Args), Args);
 }
 
-static void BreakpointDeletion(emacs_env *Env, char *Id) {
-    emacs_value Argument = GetEmacsString(Env, Id);
-    Funcall(Env, "gdb--breakpoint-deleted", 1, &Argument);
+static void breakpointDeletion(emacs_env *Env, char *Id) {
+    emacs_value Argument = getEmacsString(Env, Id);
+    funcall(Env, BreakpointDeleted, 1, &Argument);
 }
 
-static void ThreadInfo(emacs_env *Env, mi_result *Result) {
-    mi_result *Threads = GetResultList(Result, "threads");
+static void threadInfo(emacs_env *Env, mi_result *Result) {
+    mi_result *Threads = getResultList(Result, "threads");
 
-#define ThreadVariablesWriter(W) W(Id, id),     \
+#define threadVariablesWriter(W) W(Id, id),     \
         W(TargetId, target-id),                 \
         W(Name, name),                          \
         W(State, state),                        \
         W(Core, core)
 
-    enum { ThreadVariablesWriter(WriteVariableKey) };
-    char *Variables[] = { ThreadVariablesWriter(WriteVariableName) };
+    enum { threadVariablesWriter(writeVariableKey) };
+    char *Variables[] = { threadVariablesWriter(writeVariableName) };
 
     for(mi_result *Thread = Threads; Thread && Thread->kind == GDBWIRE_MI_TUPLE; Thread = Thread->next) {
         mi_result *ThreadContents = Thread->variant.result;
-        char *Values[ArrayCount(Variables)] = {};
-        GetBatchResultString(ThreadContents, Variables, Values, ArrayCount(Variables));
+        char *Values[arrayCount(Variables)] = {};
+        getBatchResultString(ThreadContents, Variables, Values, arrayCount(Variables));
 
-        emacs_value Arguments[ArrayCount(Values)];
-        GetEmacsStrings(Env, Values, Arguments, ArrayCount(Variables), false);
-        Funcall(Env, "gdb--update-thread", ArrayCount(Arguments), Arguments);
+        emacs_value Args[arrayCount(Values)];
+        getEmacsStrings(Env, Values, Args, arrayCount(Variables), false);
+        funcall(Env, UpdateThread, arrayCount(Args), Args);
     }
 }
 
-static void FrameInfo(emacs_env *Env, mi_result *Result, emacs_value ThreadId) {
-    Funcall(Env, "gdb--clear-thread-frames", 1, &ThreadId);
+static void frameInfo(emacs_env *Env, mi_result *Result, emacs_value ThreadId) {
+    funcall(Env, ClearThreadFrames, 1, &ThreadId);
 
-#define FrameVariablesWriter(W) W(Level, level),    \
+#define frameVariablesWriter(W) W(Level, level),    \
         W(Address, addr),                           \
         W(Function, func),                          \
         W(File, fullname),                          \
         W(Line, line),                              \
         W(From, from)
 
-    enum { FrameVariablesWriter(WriteVariableKey) };
-    char *Variables[] = { FrameVariablesWriter(WriteVariableName) };
+    enum { frameVariablesWriter(writeVariableKey) };
+    char *Variables[] = { frameVariablesWriter(writeVariableName) };
 
     for(mi_result *Frame = Result; Frame; Frame = Frame->next) {
         mi_result *FrameContents = Frame->variant.result;
-        char *Values[ArrayCount(Variables)] = {};
-        GetBatchResultString(FrameContents, Variables, Values, ArrayCount(Variables));
+        char *Values[arrayCount(Variables)] = {};
+        getBatchResultString(FrameContents, Variables, Values, arrayCount(Variables));
 
-        emacs_value Args[1 + ArrayCount(Variables)];
+        emacs_value Args[1 + arrayCount(Variables)];
         Args[0] = ThreadId;
-        GetEmacsStrings(Env, Values, Args+1, ArrayCount(Variables), false);
-        Funcall(Env, "gdb--add-frame-to-thread", ArrayCount(Args), Args);
+        getEmacsStrings(Env, Values, Args+1, arrayCount(Variables), false);
+        funcall(Env, AddFrameToThread, arrayCount(Args), Args);
     }
 
-    Funcall(Env, "gdb--finalize-thread-frames", 1, &ThreadId);
+    funcall(Env, FinalizeThreadFrames, 1, &ThreadId);
 }
 
-static void Disassemble(emacs_env *Env, mi_result *List, emacs_value Buffer) {
+static void disassemble(emacs_env *Env, mi_result *List, emacs_value Buffer) {
 
-#define SourceInfoVariablesWriter(W) W(Line, line, line), W(File, fullname, file)
+#define sourceInfoVariablesWriter(W) W(Line, line, line), W(File, fullname, file)
 
-    enum { SourceInfoVariablesWriter(WriteVariableKey) };
-    char *SourceVariables[] = { SourceInfoVariablesWriter(WriteVariableName) };
-    emacs_value SourceInfoElispKeys[] = { SourceInfoVariablesWriter(WriteElispStructKey) };
+    enum { sourceInfoVariablesWriter(writeVariableKey) };
+    char *SourceVariables[] = { sourceInfoVariablesWriter(writeVariableName) };
+    emacs_value SourceInfoElispKeys[] = { sourceInfoVariablesWriter(writeElispStructKey) };
 
-#define InstructionVariablesWriter(W) W(Address, address, address), \
+#define instructionVariablesWriter(W) W(Address, address, address), \
         W(Function, func-name, function),                           \
         W(Offset, offset, offset),                                  \
         W(Instruction, inst, instruction)
 
-    enum { InstructionVariablesWriter(WriteVariableKey) };
-    char *InstructionVariables[] = { InstructionVariablesWriter(WriteVariableName) };
-    emacs_value InstructionElispKeys[] = { InstructionVariablesWriter(WriteElispStructKey) };
+    enum { instructionVariablesWriter(writeVariableKey) };
+    char *InstructionVariables[] = { instructionVariablesWriter(writeVariableName) };
+    emacs_value InstructionElispKeys[] = { instructionVariablesWriter(writeElispStructKey) };
 
     bool HasSourceInfo = !strcmp(List->variable, "src_and_asm_line");
 
     u32 SourceInfoInstrListIndex = 3;
     emacs_value DisassemblyList = Nil;
-    emacs_value Cons = Intern(Env, "cons");
-    emacs_value MakeInstruction = Intern(Env, "make-gdb--instruction");
-    emacs_value MakeSourceInfo = Intern(Env, "make-gdb--source-instr-info");
+    emacs_value Cons = intern(Env, "cons");
 
     for(mi_result *Iterator = List; Iterator; Iterator = Iterator->next) {
         mi_result *Contents = Iterator->variant.result;
         if(HasSourceInfo) {
-            char *SourceValues[ArrayCount(SourceVariables)] = {};
+            char *SourceValues[arrayCount(SourceVariables)] = {};
             emacs_value SourceInfoObj;
-            GetBatchResultString(Contents, SourceVariables, SourceValues, ArrayCount(SourceVariables));
+            getBatchResultString(Contents, SourceVariables, SourceValues, arrayCount(SourceVariables));
 
             {
-                emacs_value Arguments[ArrayCount(SourceVariables)*2];
+                emacs_value Args[arrayCount(SourceVariables)*2];
                 for(int Index = 0;
-                    Index < ArrayCount(SourceVariables);
+                    Index < arrayCount(SourceVariables);
                     ++Index)
                 {
-                    Arguments[Index*2] = SourceInfoElispKeys[Index];
-                    Arguments[Index*2 + 1] = GetEmacsString(Env, SourceValues[Index]);
+                    Args[Index*2] = SourceInfoElispKeys[Index];
+                    Args[Index*2 + 1] = getEmacsString(Env, SourceValues[Index]);
                 }
-                SourceInfoObj = FuncallInterned(Env, MakeSourceInfo,
-                                                ArrayCount(Arguments), Arguments);
+                SourceInfoObj = funcall(Env, MakeSourceInfo, arrayCount(Args), Args);
             }
 
-            mi_result *InstrList = GetResultList(Contents, "line_asm_insn");
+            mi_result *InstrList = getResultList(Contents, "line_asm_insn");
             for(mi_result *InstrIterator = InstrList; InstrIterator; InstrIterator = InstrIterator->next) {
                 mi_result *Instruction = InstrIterator->variant.result;
                 emacs_value InstructionObj;
 
-                char *InstructionValues[ArrayCount(InstructionVariables)] = {};
-                GetBatchResultString(Instruction, InstructionVariables,
-                                     InstructionValues, ArrayCount(InstructionVariables));
+                char *InstructionValues[arrayCount(InstructionVariables)] = {};
+                getBatchResultString(Instruction, InstructionVariables,
+                                     InstructionValues, arrayCount(InstructionVariables));
 
-                emacs_value Arguments[ArrayCount(InstructionVariables)*2];
-                for(int Index = 0; Index < ArrayCount(InstructionVariables); ++Index) {
-                    Arguments[Index*2] = InstructionElispKeys[Index];
-                    Arguments[Index*2 + 1] = GetEmacsString(Env, InstructionValues[Index]);
+                emacs_value Args[arrayCount(InstructionVariables)*2];
+                for(int Index = 0; Index < arrayCount(InstructionVariables); ++Index) {
+                    Args[Index*2] = InstructionElispKeys[Index];
+                    Args[Index*2 + 1] = getEmacsString(Env, InstructionValues[Index]);
                 }
-                InstructionObj = FuncallInterned(Env, MakeInstruction, ArrayCount(Arguments), Arguments);
+                InstructionObj = funcall(Env, MakeInstruction, arrayCount(Args), Args);
 
                 Env->vec_set(Env, SourceInfoObj, SourceInfoInstrListIndex,
-                             FuncallInterned(Env, Cons, 2, (emacs_value[]){InstructionObj, Env->vec_get(Env, SourceInfoObj, SourceInfoInstrListIndex)}));
+                             funcall(Env, Cons, 2, (emacs_value[]){InstructionObj, Env->vec_get(Env, SourceInfoObj, SourceInfoInstrListIndex)}));
             }
 
             {
-                emacs_value Arguments[2] = {SourceInfoObj, DisassemblyList};
-                DisassemblyList = FuncallInterned(Env, Cons, 2, Arguments);
+                emacs_value Args[2] = {SourceInfoObj, DisassemblyList};
+                DisassemblyList = funcall(Env, Cons, 2, Args);
             }
         } else {
             // TODO(nox): Finish this section
@@ -350,21 +368,20 @@ static void Disassemble(emacs_env *Env, mi_result *List, emacs_value Buffer) {
     }
 
     {
-        emacs_value Arguments[3] = {Buffer, DisassemblyList, HasSourceInfo ? T : Nil};
-        Funcall(Env, "gdb--set-disassembly", 3, Arguments);
+        emacs_value Args[3] = {Buffer, DisassemblyList, HasSourceInfo ? T : Nil};
+        funcall(Env, SetDisassembly, 3, Args);
     }
 }
 
 static void miAsyncStopped(emacs_env *Env, mi_result *Result, string *PrintString) {
     for(mi_result *Iter = Result; Iter; Iter = Iter->next) {
         if(Iter->variable && strcmp(Iter->variable, "stopped-threads") == 0) {
-            char *ThreadInfoFunc = "gdb--get-thread-info";
             if(Iter->kind == GDBWIRE_MI_CSTRING) {
-                Funcall(Env, ThreadInfoFunc, 0, 0);
+                funcall(Env, GetThreadInfo, 0, 0);
             } else {
                 for(mi_result *Thread = Iter->variant.result; Thread; Thread = Thread->next) {
-                    emacs_value Arg = GetEmacsString(Env, Thread->variant.cstring);
-                    Funcall(Env, ThreadInfoFunc, 1, &Arg);
+                    emacs_value Arg = getEmacsString(Env, Thread->variant.cstring);
+                    funcall(Env, GetThreadInfo, 1, &Arg);
                 }
             }
 
@@ -373,10 +390,10 @@ static void miAsyncStopped(emacs_env *Env, mi_result *Result, string *PrintStrin
     }
 
     // NOTE(nox): *stopped does not end with a prompt...
-    PushString(PrintString, "(gdb) ");
+    pushString(PrintString, "(gdb) ");
 }
 
-static void HandleMiOobRecord(emacs_env *Env, mi_oob_record *Record, string *PrintString) {
+static void handleMiOobRecord(emacs_env *Env, mi_oob_record *Record, string *PrintString) {
     switch(Record->kind) {
         case GDBWIRE_MI_ASYNC: {
             mi_async_record *AsyncRecord = Record->variant.async_record;
@@ -389,42 +406,42 @@ static void HandleMiOobRecord(emacs_env *Env, mi_oob_record *Record, string *Pri
                         } break;
 
                         case GDBWIRE_MI_ASYNC_RUNNING: {
-                            emacs_value Argument = GetEmacsString(Env, GetResultString(Result, "thread-id"));
-                            Funcall(Env, "gdb--running", 1, &Argument);
+                            emacs_value Argument = getEmacsString(Env, getResultString(Result, "thread-id"));
+                            funcall(Env, RunningFunc, 1, &Argument);
                         } break;
 
-                        IgnoreDefaultCase;
+                        ignoreDefaultCase();
                     }
                 } break;
 
                 case GDBWIRE_MI_NOTIFY: {
                     switch(AsyncRecord->async_class) {
                         case GDBWIRE_MI_ASYNC_THREAD_CREATED: {
-                            char *ThreadId = GetResultString(Result, "id");
-                            emacs_value Argument = GetEmacsString(Env, ThreadId);
-                            Funcall(Env, "gdb--get-thread-info", 1, &Argument);
+                            char *ThreadId = getResultString(Result, "id");
+                            emacs_value Argument = getEmacsString(Env, ThreadId);
+                            funcall(Env, GetThreadInfo, 1, &Argument);
                         } break;
 
                         case GDBWIRE_MI_ASYNC_THREAD_EXITED: {
-                            char *ThreadId = GetResultString(Result, "id");
-                            emacs_value Argument = GetEmacsString(Env, ThreadId);
-                            Funcall(Env, "gdb--thread-exited", 1, &Argument);
+                            char *ThreadId = getResultString(Result, "id");
+                            emacs_value Argument = getEmacsString(Env, ThreadId);
+                            funcall(Env, ThreadExited, 1, &Argument);
                         } break;
 
                         case GDBWIRE_MI_ASYNC_BREAKPOINT_CREATED:
                         case GDBWIRE_MI_ASYNC_BREAKPOINT_MODIFIED: {
-                            BreakpointChange(Env, GetResultTuple(Result, "bkpt"));
+                            breakpointChange(Env, getResultTuple(Result, "bkpt"));
                         } break;
 
                         case GDBWIRE_MI_ASYNC_BREAKPOINT_DELETED: {
-                            BreakpointDeletion(Env, GetResultString(Result, "id"));
+                            breakpointDeletion(Env, getResultString(Result, "id"));
                         } break;
 
-                        IgnoreDefaultCase;
+                        ignoreDefaultCase();
                     }
                 } break;
 
-                IgnoreCase(GDBWIRE_MI_STATUS); // NOTE(nox): May be ignored
+                ignoreCase(GDBWIRE_MI_STATUS); // NOTE(nox): May be ignored
             }
         } break;
 
@@ -432,15 +449,15 @@ static void HandleMiOobRecord(emacs_env *Env, mi_oob_record *Record, string *Pri
             mi_stream_record *StreamRecord = Record->variant.stream_record;
             switch(StreamRecord->kind) {
                 case GDBWIRE_MI_CONSOLE: {
-                    PushString(PrintString, "%s", StreamRecord->cstring);
+                    pushString(PrintString, "%s", StreamRecord->cstring);
                 } break;
 
                 case GDBWIRE_MI_TARGET: {
                     // TODO(nox): If we are outputting to another tty, will we ever receive this?
-                    PushString(PrintString, "Target: %s", StreamRecord->cstring);
+                    pushString(PrintString, "Target: %s", StreamRecord->cstring);
                 } break;
 
-                IgnoreCase(GDBWIRE_MI_LOG);
+                ignoreCase(GDBWIRE_MI_LOG);
             }
         } break;
     }
@@ -453,9 +470,9 @@ typedef struct token_context {
         Context_Ignore,
         Context_InitialFile,
         Context_BreakpointInsert,
-        Context_ThreadInfo,
-        Context_FrameInfo,
-        Context_Disassemble,
+        Context_threadInfo,
+        Context_frameInfo,
+        Context_disassemble,
 
         Context_Size,
     } Type;
@@ -463,23 +480,22 @@ typedef struct token_context {
     emacs_value Data;
 } token_context;
 
-static token_context GetTokenContext(emacs_env *Env, char *TokenString) {
+static token_context getTokenContext(emacs_env *Env, char *TokenString) {
     token_context Result = {};
     if(TokenString) {
-        emacs_value Argument = GetEmacsString(Env, TokenString);
-        emacs_value ContextCons = Funcall(Env, "gdb--extract-context", 1, &Argument);
+        emacs_value Argument = getEmacsString(Env, TokenString);
+        emacs_value ContextCons = funcall(Env, ExtractContext, 1, &Argument);
 
-        Result.Type = Env->extract_integer(Env,
-                                           Funcall(Env, "car", 1, &ContextCons));
+        Result.Type = Env->extract_integer(Env, internFuncall(Env, "car", 1, &ContextCons));
         assert(Result.Type < Context_Size);
 
-        Result.Data = Funcall(Env, "cdr", 1, &ContextCons);
+        Result.Data = internFuncall(Env, "cdr", 1, &ContextCons);
     }
     return Result;
 }
 
-static void HandleMiResultRecord(emacs_env *Env, mi_result_record *Record, string *PrintString) {
-    token_context Context = GetTokenContext(Env, Record->token);
+static void handleMiResultRecord(emacs_env *Env, mi_result_record *Record, string *PrintString) {
+    token_context Context = getTokenContext(Env, Record->token);
 
     mi_result *Result = Record->result;
     switch(Record->result_class) {
@@ -488,56 +504,56 @@ static void HandleMiResultRecord(emacs_env *Env, mi_result_record *Record, strin
         case GDBWIRE_MI_CONNECTED: {
             switch(Context.Type) {
                 case Context_InitialFile: {
-                    char *File = GetResultString(Result, "fullname");
-                    char *Line = GetResultString(Result, "line");
+                    char *File = getResultString(Result, "fullname");
+                    char *Line = getResultString(Result, "line");
                     if(File) {
-                        emacs_value Arguments[2];
-                        Arguments[0] = GetEmacsString(Env, File);
-                        Arguments[1] = GetEmacsStringEmpty(Env, Line);
-                        Funcall(Env, "gdb--set-initial-file", 2, Arguments);
+                        emacs_value Args[2];
+                        Args[0] = getEmacsString(Env, File);
+                        Args[1] = getEmacsStringEmpty(Env, Line);
+                        funcall(Env, SetInitialFile, 2, Args);
                     }
                 } break;
 
                 case Context_BreakpointInsert: {
-                    BreakpointChange(Env, GetResultTuple(Result, "bkpt"));
+                    breakpointChange(Env, getResultTuple(Result, "bkpt"));
                 } break;
 
-                case Context_ThreadInfo: {
-                    ThreadInfo(Env, Result);
+                case Context_threadInfo: {
+                    threadInfo(Env, Result);
                 } break;
 
-                case Context_FrameInfo: {
-                    FrameInfo(Env, GetResultList(Result, "stack"), Context.Data);
+                case Context_frameInfo: {
+                    frameInfo(Env, getResultList(Result, "stack"), Context.Data);
                 } break;
 
-                case Context_Disassemble: {
-                    Disassemble(Env, GetResultList(Result, "asm_insns"), Context.Data);
+                case Context_disassemble: {
+                    disassemble(Env, getResultList(Result, "asm_insns"), Context.Data);
                 } break;
 
-                IgnoreDefaultCase;
+                ignoreDefaultCase();
             }
         } break;
 
         case GDBWIRE_MI_ERROR: {
             switch(Context.Type) {
-                IgnoreCase(Context_Ignore);
-                IgnoreCase(Context_InitialFile);
+                ignoreCase(Context_Ignore);
+                ignoreCase(Context_InitialFile);
 
                 default: {
-                    char *Message = GetResultString(Result, "msg");
+                    char *Message = getResultString(Result, "msg");
                     if(Message) {
-                        PushString(PrintString, "%s\n", Result->variant.cstring);
+                        pushString(PrintString, "%s\n", Result->variant.cstring);
                     }
                 } break;
             }
         } break;
 
         case GDBWIRE_MI_EXIT: {
-            PushString(PrintString, "Bye bye :)\n");
+            pushString(PrintString, "Bye bye :)\n");
         } break;
 
         case GDBWIRE_MI_UNSUPPORTED: {
-            PushString(PrintString, "Error while parsing, GdbWire couldn't figure out class of result record!");
+            pushString(PrintString, "Error while parsing, GdbWire couldn't figure out class of result record!");
         } break;
     }
 
@@ -551,36 +567,36 @@ static void HandleMiResultRecord(emacs_env *Env, mi_result_record *Record, strin
 #define HANDLE_GDB_MI_OUTPUT_NAME "gdb--handle-mi-output"
 #define HANDLE_GDB_MI_OUTPUT_DOC "(" HANDLE_GDB_MI_OUTPUT_NAME " output)" \
     "\nHandle GDB/MI output and return string to print."
-static emacs_value HandleGdbMiOutput(emacs_env *Env, ptrdiff_t NumberOfArguments,
-                                     emacs_value Arguments[], void *Closure) {
+static emacs_value handleGdbMiOutput(emacs_env *Env, ptrdiff_t NumberOfArgs,
+                                     emacs_value Args[], void *Closure) {
     ptrdiff_t Size;
-    Env->copy_string_contents(Env, Arguments[0], 0, &Size);
+    Env->copy_string_contents(Env, Args[0], 0, &Size);
     char *OutputString = xMalloc(Size);
-    Env->copy_string_contents(Env, Arguments[0], OutputString, &Size);
+    Env->copy_string_contents(Env, Args[0], OutputString, &Size);
 
     gdbwire_mi_parser_push(GdbMiParser, OutputString);
     free(OutputString);
 
-    string PrintString = AllocateString();
+    string PrintString = allocateString();
     for(mi_output *Output = ParserOutput; Output; Output = Output->next) {
         switch(Output->kind) {
             case GDBWIRE_MI_OUTPUT_OOB: {
-                HandleMiOobRecord(Env, Output->variant.oob_record, &PrintString);
+                handleMiOobRecord(Env, Output->variant.oob_record, &PrintString);
             } break;
 
             case GDBWIRE_MI_OUTPUT_RESULT: {
-                HandleMiResultRecord(Env, Output->variant.result_record, &PrintString);
+                handleMiResultRecord(Env, Output->variant.result_record, &PrintString);
             } break;
 
             case GDBWIRE_MI_OUTPUT_PARSE_ERROR: {
-                PushString(&PrintString, "An error occurred on token %s\n",
+                pushString(&PrintString, "An error occurred on token %s\n",
                            Output->variant.error.token);
             } break;
 
             case GDBWIRE_MI_OUTPUT_PROMPT: {
                 if(!IgnoreNextPrompt)
                 {
-                    PushString(&PrintString, "(gdb) ");
+                    pushString(&PrintString, "(gdb) ");
                 }
                 IgnoreNextPrompt = false;
             } break;
@@ -590,7 +606,7 @@ static emacs_value HandleGdbMiOutput(emacs_env *Env, ptrdiff_t NumberOfArguments
     ParserOutput = 0;
 
     emacs_value Result = Env->make_string(Env, PrintString.Contents, PrintString.Len);
-    FreeString(&PrintString);
+    freeString(&PrintString);
 
     return Result;
 }
@@ -598,18 +614,20 @@ static emacs_value HandleGdbMiOutput(emacs_env *Env, ptrdiff_t NumberOfArguments
 s32 emacs_module_init(emacs_runtime *EmacsRuntime) {
     emacs_env *Env = EmacsRuntime->get_environment(EmacsRuntime);
 
-    emacs_value Arguments[2];
-    Arguments[0] = Intern(Env, HANDLE_GDB_MI_OUTPUT_NAME);
-    Arguments[1] = Env->make_function(Env, 1, 1, HandleGdbMiOutput, HANDLE_GDB_MI_OUTPUT_DOC, 0);
-    Funcall(Env, "fset", 2, Arguments);
+    apiFunctionsWriter(apiFunctionInternWriter);
 
-    gdbwire_callbacks Callbacks = {0, GdbWireCallback};
+    emacs_value Args[2];
+    Args[0] = intern(Env, HANDLE_GDB_MI_OUTPUT_NAME);
+    Args[1] = Env->make_function(Env, 1, 1, handleGdbMiOutput, HANDLE_GDB_MI_OUTPUT_DOC, 0);
+    internFuncall(Env, "defalias", 2, Args);
+
+    gdbwire_callbacks Callbacks = {0, gdbWireCallback};
     GdbMiParser = gdbwire_mi_parser_create(Callbacks);
 
-    Nil = Intern(Env, "nil");
-    T = Intern(Env, "t");
+    Nil = intern(Env, "nil");
+    T = intern(Env, "t");
 
-    emacs_value Feature = Intern(Env, "gdb-module");
-    Funcall(Env, "provide", 1, &Feature);
+    emacs_value Feature = intern(Env, "gdb-module");
+    internFuncall(Env, "provide", 1, &Feature);
     return 0;
 }
