@@ -29,10 +29,10 @@
 (defvar gdb-debug nil
   "List of debug symbols, which will enable different components.
 Possible values are:
-  - `gdb-debug-timings': show timings of some function calls
-  - `gdb-debug-log-commands': show which GDB commands are sent
-  - `gdb-debug-raw-input': send comint input as is
-  - `gdb-debug-raw-output': print GDB/MI output to the messages buffer
+  - `timings': show timings of some function calls
+  - `commands': show which GDB commands are sent
+  - `raw-input': send comint input as is
+  - `raw-output': print GDB/MI output to the messages buffer
 
 This can also be set to t, which means that all debug components are active.")
 
@@ -176,12 +176,16 @@ This is shared among all sessions.")
       (when (> (length (frame-list)) 0)
         (delete-frame (gdb--session-frame session))))
 
+    (set-process-sentinel (gdb--session-process session) nil)
     (delete-process (gdb--session-process session))
     (dolist (buffer (gdb--session-buffers session))
       (when (buffer-live-p buffer)
         (with-current-buffer buffer
           (let ((type (gdb--buffer-info-type gdb--buffer-info)))
-            (when (eq type 'gdb--inferior-io) (delete-process (get-buffer-process buffer)))
+            (when (eq type 'gdb--inferior-io)
+              (set-process-sentinel (get-buffer-process buffer) nil)
+              (delete-process (get-buffer-process buffer)))
+
             (if (memq type gdb--keep-buffer-types)
                 (setq gdb--buffer-info nil)
               (kill-buffer))))))
@@ -302,7 +306,7 @@ All embedded quotes, newlines, and backslashes are preceded with a backslash."
 
 (defmacro gdb--measure-time (string &rest body)
   "Measure the time it takes to evaluate BODY."
-  `(if (gdb--debug-check 'gdb-debug-timings)
+  `(if (gdb--debug-check 'timings)
        (progn
          (message (concat "Starting measurement: " ,string))
          (let ((time (current-time))
@@ -327,7 +331,7 @@ All embedded quotes, newlines, and backslashes are preceded with a backslash."
                 (from (gdb--frame-from frame)))
             (when file (setq file (file-name-nondirectory file)))
             (concat
-             "in " (propertize (or func "???") 'font-lock-face font-lock-function-name-face)
+             "in " (propertize (or func "??") 'font-lock-face font-lock-function-name-face)
              (and for-threads-view (concat " at " addr))
              (or (and file line (concat " of " file ":" line))
                  (and from (concat " of " from))))))
@@ -502,16 +506,16 @@ calling `gdb--table-string'."
 
 (defun gdb--comint-sender (process string)
   "Send user commands from comint."
-  (if (gdb--debug-check 'gdb-debug-raw-input)
-      (comint-simple-send process string)
-    (comint-simple-send process (concat "-interpreter-exec console " (gdb--escape-argument string)))))
+  (if (gdb--debug-check 'raw-input)
+      (gdb--command string nil t)
+    (gdb--command (concat "-interpreter-exec console " (gdb--escape-argument string)))))
 
 (defun gdb--output-filter (string)
   "Parse GDB/MI output."
-  (gdb--debug-execute-body 'gdb-debug-raw-output (message "%s" string))
+  (gdb--debug-execute-body 'raw-output (message "%s" string))
   (let ((output (gdb--measure-time "Handle MI Output" (gdb--handle-mi-output string))))
     (gdb--update)
-    (gdb--debug-execute-body '(gdb-debug-timings gdb-debug-log-commands gdb-debug-raw-output)
+    (gdb--debug-execute-body '(timings commands raw-output)
       (message "--------------------"))
     output))
 
@@ -524,42 +528,75 @@ calling `gdb--table-string'."
       (with-current-buffer buffer
         (gdb--kill-session (gdb--infer-session t))))))
 
-(defun gdb--command (command &optional context force-stopped)
-  "Execute GDB COMMAND.
+(defun gdb--command (command &optional context thread-or-frame force-stopped)
+  "Execute COMMAND in GDB.
 If provided, the CONTEXT is assigned to a unique token, which
 will be received, alongside the output, by the dynamic module,
-and used to know what the context of that output was. When
-FORCE-STOPPED is non-nil, ensure that exists at least one stopped
-thread before running the command.
+and used to know what the context of that output was. CONTEXT may
+be a cons (CONTEXT-TYPE . DATA), where DATA is anything relevant
+for the context, or just CONTEXT-TYPE. CONTEXT-TYPE must be a
+member of `gdb--available-contexts'.
 
-CONTEXT may be a cons (CONTEXT-TYPE . DATA), where DATA is
-anything relevant for the context, or just CONTEXT-TYPE.
-CONTEXT-TYPE must be a member of `gdb--available-contexts'."
+If THREAD-or-FRAME is:
+  a thread/frame: the command will run on that thread/frame
+      an integer: the command will run on the thread with that ID
+               t: the command will run on the selected thread/frame, when available
+             nil: the command will run without specifying any thread/frame
+
+When FORCE-STOPPED is non-nil, ensure that exists at least one
+stopped thread before running the command."
   (gdb--with-valid-session
    "Could not run command because no session is available"
-   (let ((process (gdb--session-process session))
-         (context-type (or (and (consp context) (car context)) context))
-         (threads (gdb--session-threads session))
-         token stopped-thread-id-str)
+   (let* ((context-type (or (and (consp context) (car context)) context))
+          (in-frame (cond ((eq (type-of thread-or-frame) 'gdb--frame) thread-or-frame)
+                          ((eq (type-of thread-or-frame) 'gdb--thread) (car (gdb--thread-frames thread-or-frame)))
+                          ((eq thread-or-frame t) (gdb--session-selected-frame session))))
+          (in-thread (cond (in-frame (gdb--frame-thread in-frame))
+                           ((eq (type-of thread-or-frame) 'gdb--thread) thread-or-frame)
+                           ((integerp thread-or-frame) (or (gdb--get-thread-by-id thread-or-frame)
+                                                           (make-gdb--thread :id thread-or-frame)))
+                           ((eq thread-or-frame t) (gdb--session-selected-thread session))))
+          token stopped-thread)
      (when (memq context-type gdb--available-contexts)
        (setq token (number-to-string gdb--next-token)
-             command (concat token command)
              gdb--next-token (1+ gdb--next-token))
        (when (not (consp context)) (setq context (cons context-type nil)))
        (push (cons token context) gdb--token-contexts))
 
-     (when (and force-stopped (> (length threads) 0))
-       (when (not (cl-loop for thread in threads
-                           when (string= "stopped" (gdb--thread-state thread))
-                           return t))
-         (setq stopped-thread-id-str (number-to-string (caar threads)))
-         (gdb--command (concat "-exec-interrupt --thread " stopped-thread-id-str) 'gdb--context-ignore)))
+     (when (and force-stopped (not (cl-loop for thread in (gdb--session-threads session)
+                                            when (string= "stopped" (gdb--thread-state thread))
+                                            return t)))
+       (setq stopped-thread (or in-thread (car (gdb--session-threads session))))
+       (gdb--command "-exec-interrupt" 'gdb--context-ignore stopped-thread))
 
-     (comint-simple-send process command)
+     (setq command (concat token command
+                           (and in-thread (format " --thread %d" (gdb--thread-id in-thread)))
+                           (and in-frame  (format " --frame  %d" (gdb--frame-level in-frame)))))
+     (gdb--debug-execute-body 'commands (message "Command %s" command))
+     (comint-simple-send (gdb--session-process session) command)
 
-     (when stopped-thread-id-str
-       (gdb--command (concat "-exec-continue --thread " stopped-thread-id-str) 'gdb--context-ignore))
-     (gdb--debug-execute-body 'gdb-debug-log-commands (message "Command %s" command)))))
+     (when stopped-thread (gdb--command "-exec-continue" 'gdb--context-ignore stopped-thread)))))
+
+(defun gdb--infer-thread-or-frame ()
+  ;; (when (not thread)
+  ;;   (cond ((eq gdb--buffer-type 'gdb--threads)
+  ;;          (setq thread (get-text-property (point) 'gdb--thread-id))
+  ;;          (when thread (setq thread (int-to-string thread))))
+  ;;         ((eq gdb--buffer-type 'gdb--frames)
+  ;;          (setq thread (or gdb--thread-id (gdb--local gdb--thread-id)))
+  ;;          (setq frame (get-text-property (point) 'gdb--frame-level))
+  ;;          (when thread
+  ;;            (setq thread (int-to-string thread))
+  ;;            (when frame (setq frame (int-to-string frame)))))
+  ;;         ((eq gdb--buffer-type 'gdb--disassembly) ;; TODO(nox): Do this when disassembly is done
+  ;;          )
+  ;;         (t (setq thread (gdb--local (and gdb--thread-id
+  ;;                                          (int-to-string gdb--thread-id)))))))
+  ;; (gdb--command (concat command
+  ;;                       (and thread (concat " --thread " thread))
+  ;;                       (and thread frame (concat " --frame " frame)))
+  ;;               context)
+  )
 
 
 ;; ------------------------------------------------------------------------------------------
@@ -587,6 +624,7 @@ CONTEXT-TYPE must be a member of `gdb--available-contexts'."
   (let ((process-status (process-status process))
         (buffer (process-buffer process)))
     (cond ((eq process-status 'failed)
+           (set-process-sentinel process nil)
            (delete-process process)
            (when buffer (gdb--inferior-io-initialization buffer)))
           ((and (string= str "killed\n") buffer)
@@ -780,19 +818,19 @@ it from the list."
 (defun gdb--running (thread-id-str)
   (gdb--with-valid-session
    (let ((thread (gdb--get-thread-by-id (string-to-number thread-id-str)))
-         (current-thread (gdb--session-selected-thread session)))
+         (selected-thread (gdb--session-selected-thread session)))
      (when thread
        (setf (gdb--thread-state thread) "running"
              (gdb--thread-frames thread) nil)
        (cl-pushnew 'gdb--threads (gdb--session-buffer-types-to-update session))
        (cl-pushnew 'gdb--frames  (gdb--session-buffer-types-to-update session))
-       (when (eq thread current-thread) (gdb--remove-all-symbols session 'gdb--source-indicator t))))))
+       (when (eq thread selected-thread) (gdb--remove-all-symbols session 'gdb--source-indicator t))))))
 
 (defun gdb--set-initial-file (file line-string)
   (gdb--display-source-buffer file (string-to-number line-string) t))
 
 (defun gdb--get-thread-info (&optional id-str)
-  (gdb--command (concat "-thread-info " id-str) 'gdb--context-thread-info))
+  (gdb--command "-thread-info" 'gdb--context-thread-info (and id-str (string-to-number id-str))))
 
 (defun gdb--thread-exited (thread-id-str)
   (gdb--with-valid-session
@@ -821,7 +859,7 @@ it from the list."
        (setf (gdb--session-threads session) (append (gdb--session-threads session) (list thread))))
 
      (if (string= "stopped" state)
-         (gdb--command (concat "-stack-list-frames --thread " id-str) (cons 'gdb--context-frame-info id-str))
+         (gdb--command "-stack-list-frames" (cons 'gdb--context-frame-info id-str) thread)
        ;; NOTE(nox): Only update when it is running, otherwise it will update when the frame list
        ;; arrives.
        (cl-pushnew 'gdb--threads (gdb--session-buffer-types-to-update session))
@@ -851,33 +889,33 @@ it from the list."
 
 (defun gdb--breakpoint-changed (number type disp enabled addr func fullname line at
                                        pending thread cond times what)
-  ;; (gdb--local
-  ;;  (let* ((number (string-to-number number))
-  ;;         (breakpoint
-  ;;          (make-gdb--breakpoint
-  ;;           :type (or type "")
-  ;;           :disp (or disp "")
-  ;;           :enabled (string= enabled "y")
-  ;;           :addr (or addr "")
-  ;;           :hits (or times "")
-  ;;           :what (concat (or what pending at
-  ;;                             (concat "in "
-  ;;                                     (propertize (or func "???")
-  ;;                                                 'font-lock-face font-lock-function-name-face)
-  ;;                                     (and fullname line (concat " at "
-  ;;                                                                (file-name-nondirectory fullname)
-  ;;                                                                ":"
-  ;;                                                                line))))
-  ;;                         (and cond (concat " if " cond))
-  ;;                         (and thread (concat " on thread " thread)))
-  ;;           :file fullname
-  ;;           :line line))
-  ;;         (existing (assq number gdb--breakpoints)))
-  ;;    (if existing
-  ;;        (setf (alist-get number gdb--breakpoints) breakpoint)
-  ;;      (add-to-list 'gdb--breakpoints `(,number . ,breakpoint) t))
-  ;;    (add-to-list 'gdb--buffer-types-to-update 'gdb--breakpoints)))
-  )
+  (gdb--with-valid-session
+   ;; (let* ((number (string-to-number number))
+   ;;        (breakpoint
+   ;;         (make-gdb--breakpoint
+   ;;          :type (or type "")
+   ;;          :disp (or disp "")
+   ;;          :enabled (string= enabled "y")
+   ;;          :addr (or addr "")
+   ;;          :hits (or times "")
+   ;;          :what (concat (or what pending at
+   ;;                            (concat "in "
+   ;;                                    (propertize (or func "???")
+   ;;                                                'font-lock-face font-lock-function-name-face)
+   ;;                                    (and fullname line (concat " at "
+   ;;                                                               (file-name-nondirectory fullname)
+   ;;                                                               ":"
+   ;;                                                               line))))
+   ;;                        (and cond (concat " if " cond))
+   ;;                        (and thread (concat " on thread " thread)))
+   ;;          :file fullname
+   ;;          :line line))
+   ;;        (existing (assq number gdb--breakpoints)))
+   ;;   (if existing
+   ;;       (setf (alist-get number gdb--breakpoints) breakpoint)
+   ;;     (add-to-list 'gdb--breakpoints `(,number . ,breakpoint) t))
+   ;;   (add-to-list 'gdb--buffer-types-to-update 'gdb--breakpoints))
+   ))
 
 (defun gdb--breakpoint-deleted (number)
   ;; (gdb--local
