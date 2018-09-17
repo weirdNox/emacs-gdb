@@ -315,7 +315,10 @@ All embedded quotes, newlines, and backslashes are preceded with a backslash."
            result))
      (progn ,@body)))
 
-(defsubst gdb--current-line () (string-to-number (format-mode-line "%l")))
+(defsubst gdb--current-line ()
+  "Return an integer of the current line of point in the current buffer."
+  (save-restriction (widen) (save-excursion (beginning-of-line)
+                                            (1+ (count-lines 1 (point))))))
 
 (defmacro gdb--update-struct (type struct &rest pairs)
   (declare (indent defun))
@@ -337,7 +340,7 @@ All embedded quotes, newlines, and backslashes are preceded with a backslash."
 
 ;; ------------------------------------------------------------------------------------------
 ;; Tables
-(defsubst gdb--pad-string (string padding) (format (concat "%" (number-to-string padding) "s") string))
+(defsubst gdb--pad-string (string padding) (format (concat "%" (number-to-string padding) "s") (or string "")))
 
 (cl-defstruct gdb--table
   (column-sizes nil)
@@ -467,11 +470,10 @@ calling `gdb--table-string'."
       (setf (gdb--session-source-window session) middle-left))))
 
 (defun gdb--scroll-buffer-to-line (buffer line)
-  (let ((windows (get-buffer-window-list buffer nil t)))
-    (dolist (window windows)
-      (with-selected-window window
-        (goto-char (point-min))
-        (forward-line (1- line))))))
+  (dolist (window (get-buffer-window-list buffer nil t))
+    (with-selected-window window
+      (goto-char (point-min))
+      (forward-line (1- line)))))
 
 
 ;; ------------------------------------------------------------------------------------------
@@ -499,7 +501,7 @@ calling `gdb--table-string'."
 (defun gdb--comint-sender (_process string)
   "Send user commands from comint."
   (if (gdb--debug-check 'raw-input)
-      (gdb--command string nil t)
+      (gdb--command string nil)
     (gdb--command (concat "-interpreter-exec console " (gdb--escape-argument string)))))
 
 (defun gdb--output-filter (string)
@@ -855,15 +857,21 @@ it from the list."
      (when thread
        (setf (gdb--thread-state thread) "running"
              (gdb--thread-frames thread) nil)
+
+       (when (eq thread selected-thread)
+         (gdb--remove-all-symbols session 'gdb--source-indicator t)
+         (cl-loop for thread in (gdb--session-threads session)
+                  when (string= (gdb--thread-state thread) "stopped")
+                  do (gdb--switch-to-thread thread) and return nil))
+
        (cl-pushnew 'gdb--threads (gdb--session-buffer-types-to-update session))
-       (cl-pushnew 'gdb--frames  (gdb--session-buffer-types-to-update session))
-       (when (eq thread selected-thread) (gdb--remove-all-symbols session 'gdb--source-indicator t))))))
+       (cl-pushnew 'gdb--frames  (gdb--session-buffer-types-to-update session))))))
 
 (defun gdb--set-initial-file (file line-str)
   (gdb--display-source-buffer file (string-to-number line-str) t))
 
 (defun gdb--get-thread-info (&optional id-str)
-  (gdb--command "-thread-info" 'gdb--context-thread-info (and id-str (string-to-number id-str))))
+  (gdb--command (concat "-thread-info " id-str) 'gdb--context-thread-info))
 
 (defun gdb--thread-exited (thread-id-str)
   (gdb--with-valid-session
@@ -882,11 +890,7 @@ it from the list."
           (thread (or existing-thread (make-gdb--thread))))
 
      (gdb--update-struct gdb--thread thread
-       (id id)
-       (target-id target-id)
-       (name (or name ""))
-       (state (or state "running"))
-       (core (or core "")))
+       (id id) (target-id target-id) (name name) (state state) (core core))
 
      (unless existing-thread
        (setf (gdb--session-threads session) (append (gdb--session-threads session) (list thread))))
@@ -896,7 +900,7 @@ it from the list."
        ;; NOTE(nox): Only update when it is running, otherwise it will update when the frame list
        ;; arrives.
        (cl-pushnew 'gdb--threads (gdb--session-buffer-types-to-update session))
-       (gdb--conditional-switch thread)))))
+       (gdb--conditional-switch thread '(no-selected-thread))))))
 
 (defun gdb--clear-thread-frames (thread-id-str)
   (gdb--with-valid-session

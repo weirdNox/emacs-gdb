@@ -242,8 +242,8 @@ static void breakpointChange(emacs_env *Env, mi_result *Breakpoint) {
 }
 
 static void breakpointDeletion(emacs_env *Env, char *Id) {
-    emacs_value Argument = getEmacsString(Env, Id);
-    funcall(Env, BreakpointDeleted, 1, &Argument);
+    emacs_value Arg = getEmacsString(Env, Id);
+    funcall(Env, BreakpointDeleted, 1, &Arg);
 }
 
 static void threadInfo(emacs_env *Env, mi_result *Result) {
@@ -406,8 +406,8 @@ static void handleMiOobRecord(emacs_env *Env, mi_oob_record *Record, string *Pri
                         } break;
 
                         case GDBWIRE_MI_ASYNC_RUNNING: {
-                            emacs_value Argument = getEmacsString(Env, getResultString(Result, "thread-id"));
-                            funcall(Env, RunningFunc, 1, &Argument);
+                            emacs_value Arg = getEmacsString(Env, getResultString(Result, "thread-id"));
+                            funcall(Env, RunningFunc, 1, &Arg);
                         } break;
 
                         ignoreDefaultCase();
@@ -418,14 +418,14 @@ static void handleMiOobRecord(emacs_env *Env, mi_oob_record *Record, string *Pri
                     switch(AsyncRecord->async_class) {
                         case GDBWIRE_MI_ASYNC_THREAD_CREATED: {
                             char *ThreadId = getResultString(Result, "id");
-                            emacs_value Argument = getEmacsString(Env, ThreadId);
-                            funcall(Env, GetThreadInfo, 1, &Argument);
+                            emacs_value Args[] = {getEmacsString(Env, ThreadId), Nil, Nil, Nil, Nil};
+                            funcall(Env, UpdateThread, arrayCount(Args), Args);
                         } break;
 
                         case GDBWIRE_MI_ASYNC_THREAD_EXITED: {
                             char *ThreadId = getResultString(Result, "id");
-                            emacs_value Argument = getEmacsString(Env, ThreadId);
-                            funcall(Env, ThreadExited, 1, &Argument);
+                            emacs_value Arg = getEmacsString(Env, ThreadId);
+                            funcall(Env, ThreadExited, 1, &Arg);
                         } break;
 
                         case GDBWIRE_MI_ASYNC_BREAKPOINT_CREATED:
@@ -483,8 +483,8 @@ typedef struct token_context {
 static token_context getTokenContext(emacs_env *Env, char *TokenString) {
     token_context Result = {};
     if(TokenString) {
-        emacs_value Argument = getEmacsString(Env, TokenString);
-        emacs_value ContextCons = funcall(Env, ExtractContext, 1, &Argument);
+        emacs_value Arg = getEmacsString(Env, TokenString);
+        emacs_value ContextCons = funcall(Env, ExtractContext, 1, &Arg);
 
         Result.Type = Env->extract_integer(Env, internFuncall(Env, "car", 1, &ContextCons));
         assert(Result.Type < Context_Size);
