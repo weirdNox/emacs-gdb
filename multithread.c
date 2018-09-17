@@ -4,14 +4,12 @@
 #include <stdlib.h>
 #include <pthread.h>
 
-void *threadFunction(void *vargp)
-{
+void *threadFunction(void *vargp) {
     printf("Thread\n");
     return 0;
 }
 
-int main()
-{
+int main() {
     pthread_t thread_id;
     printf("Before Thread\n");
     pthread_create(&thread_id, 0, threadFunction, 0);
