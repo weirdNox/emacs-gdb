@@ -353,8 +353,7 @@ All embedded quotes, newlines, and backslashes are preceded with a backslash."
 
 (defun gdb--table-add-row (table row &optional properties)
   "Add ROW, a list of strings, to TABLE and recalculate column sizes.
-When non-nil, PROPERTIES will be added to the whole row when
-calling `gdb--table-string'."
+When non-nil, PROPERTIES will be added to the whole row when printing."
   (let ((right-align (gdb--table-right-align table)))
     (unless (gdb--table-column-sizes table)
       (setf (gdb--table-column-sizes table) (make-list (length row) 0)))
@@ -369,20 +368,32 @@ calling `gdb--table-string'."
 
     (unless right-align (setcar (last (gdb--table-column-sizes table)) 0))))
 
-(defun gdb--table-string (table &optional sep)
-  "Return TABLE as a string with columns separated with SEP."
-  (let ((column-sizes (gdb--table-column-sizes table)))
+(defun gdb--table-row-string (row column-sizes properties sep)
+  "Return ROW as a string, with PROPERTIES and respective COLUMN-SIZES, separated by SEP."
+  (apply #'propertize (cl-loop for string in row
+                               and size   in column-sizes
+                               and first = t then nil
+                               unless first concat sep
+                               concat (gdb--pad-string string size))
+         properties))
+
+(defun gdb--table-insert (table &optional with-header sep)
+  "Erase buffer and insert TABLE with columns separated with SEP (space as default).
+If WITH-HEADER is set, then the first row is used as header. The table contents _are modified_."
+  (let ((column-sizes (gdb--table-column-sizes table))
+        (sep (or sep " ")))
+    (erase-buffer)
+
+    (when with-header
+      (setq-local header-line-format
+                  (list " " (gdb--table-row-string (pop (gdb--table-rows table)) column-sizes
+                                                   (pop (gdb--table-row-properties table)) sep))))
+
     (cl-loop for row        in (gdb--table-rows table)
              and properties in (gdb--table-row-properties table)
              and first = t then nil
-             unless first concat "\n"
-             concat (apply #'propertize
-                           (cl-loop for string in row
-                                    and size   in column-sizes
-                                    and first = t then nil
-                                    unless first concat sep
-                                    concat (gdb--pad-string string size))
-                           properties))))
+             unless first do (insert "\n")
+             do (insert (gdb--table-row-string row column-sizes properties sep)))))
 
 
 ;; ------------------------------------------------------------------------------------------
@@ -667,8 +678,7 @@ stopped thread before running the command."
          (when (eq cursor-on-thread thread) (setq cursor-on-line count))))
 
      (remove-overlays nil nil 'gdb--thread-indicator t)
-     (erase-buffer)
-     (insert (gdb--table-string table " "))
+     (gdb--table-insert table t)
      (gdb--scroll-buffer-to-line (current-buffer) cursor-on-line)
 
      (when selected-thread-line
@@ -705,8 +715,7 @@ stopped thread before running the command."
          (when (eq cursor-on-frame frame) (setq cursor-on-line count))))
 
      (remove-overlays nil nil 'gdb--frame-indicator t)
-     (erase-buffer)
-     (insert (gdb--table-string table " "))
+     (gdb--table-insert table t)
      (gdb--scroll-buffer-to-line (current-buffer) cursor-on-line)
 
      (when selected-frame-line
@@ -739,8 +748,7 @@ stopped thread before running the command."
                                          (gdb--breakpoint-hits   breakpoint) (gdb--breakpoint-what   breakpoint))
                              `(gdb--breakpoint ,breakpoint))))
 
-     (erase-buffer)
-     (insert (gdb--table-string table " ")))))
+     (gdb--table-insert table t))))
 
 
 ;; ------------------------------------------------------------------------------------------
@@ -764,8 +772,7 @@ stopped thread before running the command."
         table (list (propertize (gdb--variable-name  variable) 'face 'font-lock-variable-name-face)
                     (propertize (gdb--variable-type  variable) 'face 'font-lock-type-face)
                     (or         (gdb--variable-value variable) "<Composite type>"))))
-     (erase-buffer)
-     (insert (gdb--table-string table " ")))))
+     (gdb--table-insert table t))))
 
 
 ;; ------------------------------------------------------------------------------------------
@@ -868,7 +875,7 @@ Create the buffer, if it wasn't already open."
         (line (gdb--breakpoint-line breakpoint)))
     (when (and file line)
       (with-current-buffer (gdb--find-file file)
-        (remove-overlays (point-min) (point-max) 'gdb--breakpoint breakpoint)))))
+        (remove-overlays nil nil 'gdb--breakpoint breakpoint)))))
 
 
 ;; ------------------------------------------------------------------------------------------
