@@ -58,12 +58,13 @@ dynamic module.")
 (defconst gdb--buffer-types
   '(gdb--comint
     gdb--inferior-io
-    gdb--breakpoints
     gdb--threads
     gdb--frames
+    gdb--breakpoints
+    gdb--variables
+    gdb--watcher
     gdb--disassembly
-    gdb--registers
-    gdb--variables)
+    gdb--registers)
   "List of available buffer types.")
 
 (defconst gdb--keep-buffer-types '(gdb--comint gdb--inferior-io)
@@ -348,11 +349,7 @@ All embedded quotes, newlines, and backslashes are preceded with a backslash."
 ;; Tables
 (defsubst gdb--pad-string (string padding) (format (concat "%" (number-to-string padding) "s") (or string "")))
 
-(cl-defstruct gdb--table
-  (column-sizes nil)
-  (rows nil)
-  (row-properties nil)
-  (right-align nil))
+(cl-defstruct gdb--table column-sizes rows row-properties right-align)
 
 (defun gdb--table-add-row (table row &optional properties)
   "Add ROW, a list of strings, to TABLE and recalculate column sizes.
@@ -362,31 +359,30 @@ calling `gdb--table-string'."
     (unless (gdb--table-column-sizes table)
       (setf (gdb--table-column-sizes table) (make-list (length row) 0)))
 
-    (setf (gdb--table-rows table)           (append (gdb--table-rows table) (list row)))
+    (setf (gdb--table-rows           table) (append (gdb--table-rows           table) (list row)))
     (setf (gdb--table-row-properties table) (append (gdb--table-row-properties table) (list properties)))
 
-    (setf (gdb--table-column-sizes table) (cl-mapcar (lambda (x s)
-                                                       (let ((new-x
-                                                              (max (abs x) (string-width (or s "")))))
-                                                         (if right-align new-x (- new-x))))
-                                                     (gdb--table-column-sizes table)
-                                                     row))
+    (setf (gdb--table-column-sizes table)
+          (cl-loop for size in (gdb--table-column-sizes table) and string in row
+                   collect (let ((new-size (max (abs size) (string-width (or string "")))))
+                             (if right-align new-size (- new-size)))))
 
-    (unless (gdb--table-right-align table) (setcar (last (gdb--table-column-sizes table)) 0))))
+    (unless right-align (setcar (last (gdb--table-column-sizes table)) 0))))
 
 (defun gdb--table-string (table &optional sep)
   "Return TABLE as a string with columns separated with SEP."
   (let ((column-sizes (gdb--table-column-sizes table)))
-    (mapconcat
-     'identity
-     (cl-mapcar
-      (lambda (row properties)
-        (apply 'propertize
-               (mapconcat 'identity (cl-mapcar (lambda (s x) (gdb--pad-string s x)) row column-sizes) sep)
-               properties))
-      (gdb--table-rows table)
-      (gdb--table-row-properties table))
-     "\n")))
+    (cl-loop for row        in (gdb--table-rows table)
+             and properties in (gdb--table-row-properties table)
+             and first = t then nil
+             unless first concat "\n"
+             concat (apply #'propertize
+                           (cl-loop for string in row
+                                    and size   in column-sizes
+                                    and first = t then nil
+                                    unless first concat sep
+                                    concat (gdb--pad-string string size))
+                           properties))))
 
 
 ;; ------------------------------------------------------------------------------------------
@@ -757,7 +753,7 @@ stopped thread before running the command."
 
 
 ;; ------------------------------------------------------------------------------------------
-;; Locals buffer
+;; Variables buffer
 (define-derived-mode gdb--variables-mode nil "GDB Variables"
   (setq-local buffer-read-only t)
   (buffer-disable-undo))
@@ -780,6 +776,20 @@ stopped thread before running the command."
      (erase-buffer)
      (insert (gdb--table-string table " ")))))
 
+
+;; ------------------------------------------------------------------------------------------
+;; Watcher buffers
+;; (define-derived-mode gdb--watcher-mode nil "GDB Watcher"
+;;   (setq-local buffer-read-only t)
+;;   (buffer-disable-undo))
+
+;; (gdb--simple-get-buffer gdb--watcher gdb--watcher-update
+;;   (gdb--rename-buffer "Watcher")
+;;   (gdb--watcher-mode))
+
+;; (defun gdb--watcher-update ()
+;;   (gdb--with-valid-session
+;;    ))
 
 ;; ------------------------------------------------------------------------------------------
 ;; Source buffers

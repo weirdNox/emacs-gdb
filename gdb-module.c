@@ -154,8 +154,7 @@ static void *getResultVariable_(mi_result *Result, char *Variable,
 #define getResultString(Result, Variable)                               \
     (char *)getResultVariable_(Result, Variable, GDBWIRE_MI_CSTRING)
 
-static void getBatchResultString(mi_result *Result, char *Variables[], char *Values[],
-                                 u32 NumberOfVariables) {
+static void getBatchResultString(mi_result *Result, char *Variables[], char *Values[], u32 NumberOfVariables) {
     if(Result && Variables && Values) {
         u32 StartAt = 0;
         for(mi_result *Iterator = Result; Iterator; Iterator = Iterator->next) {
@@ -347,10 +346,7 @@ static void disassemble(emacs_env *Env, mi_result *List, emacs_value Buffer) {
 
             {
                 emacs_value Args[arrayCount(SourceVariables)*2];
-                for(int Index = 0;
-                    Index < arrayCount(SourceVariables);
-                    ++Index)
-                {
+                for(int Index = 0; Index < arrayCount(SourceVariables); ++Index) {
                     Args[Index*2] = SourceInfoElispKeys[Index];
                     Args[Index*2 + 1] = getEmacsString(Env, SourceValues[Index]);
                 }
