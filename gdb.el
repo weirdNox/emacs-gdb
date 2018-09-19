@@ -45,10 +45,11 @@ This can also be set to t, which means that all debug components are active.")
 (defconst gdb--available-contexts
   '(gdb--context-ignore
     gdb--context-initial-file
-    gdb--context-breakpoint-insert
     gdb--context-thread-info
-    gdb--context-frame-info  ;; DATA: Thread ID string
-    gdb--context-disassemble ;; DATA: Disassemble buffer
+    gdb--context-frame-info     ;; Data: Thread
+    gdb--context-breakpoint-insert
+    gdb--context-get-variables  ;; Data: Frame
+    gdb--context-disassemble    ;; Data: Disassemble buffer
     )
   "List of implemented token contexts.
 Must be in the same order of the `token_context' enum in the
@@ -62,15 +63,15 @@ dynamic module.")
     gdb--frames
     gdb--disassembly
     gdb--registers
-    gdb--locals
-    gdb--expression-watcher)
+    gdb--variables)
   "List of available buffer types.")
 
 (defconst gdb--keep-buffer-types '(gdb--comint gdb--inferior-io)
   "List of buffer types that should be kept after GDB is killed.")
 
 (cl-defstruct gdb--thread id target-id name state frames core)
-(cl-defstruct gdb--frame thread level addr func file line from)
+(cl-defstruct gdb--frame thread level addr func file line from variables)
+(cl-defstruct gdb--variable name type value)
 
 (cl-defstruct gdb--breakpoint number type disp enabled addr hits what file line)
 (defconst gdb--available-breakpoint-types
@@ -241,8 +242,13 @@ THREAD may be nil, which means to remove the selected THREAD."
 When FRAME is in a different thread, switch to it."
   (gdb--with-valid-session
    (unless (eq frame (gdb--session-selected-frame session))
-     (when frame (gdb--switch-to-thread (gdb--frame-thread frame)))
      (setf (gdb--session-selected-frame session) frame)
+
+     (when frame (gdb--switch-to-thread (gdb--frame-thread frame)))
+
+     (if (and frame (not (gdb--frame-variables frame)))
+         (gdb--command "-stack-list-variables --simple-values" (cons 'gdb--context-get-variables frame) frame)
+       (cl-pushnew 'gdb--variables (gdb--session-buffer-types-to-update session)))
 
      (let ((file (and frame (gdb--complete-path (gdb--frame-file frame))))
            (line (and frame (gdb--frame-line frame))))
@@ -465,7 +471,7 @@ calling `gdb--table-string'."
       (gdb--set-window-buffer top-left     (gdb--comint-get-buffer session))
       (gdb--set-window-buffer top-right    (gdb--frames-get-buffer session))
       (gdb--set-window-buffer middle-right (gdb--inferior-io-get-buffer session))
-      (gdb--set-window-buffer bottom-left  (gdb--breakpoints-get-buffer session))
+      (gdb--set-window-buffer bottom-left  (gdb--variables-get-buffer session))
       (gdb--set-window-buffer bottom-right (gdb--threads-get-buffer session))
       (setf (gdb--session-source-window session) middle-left))))
 
@@ -541,7 +547,8 @@ When FORCE-STOPPED is non-nil, ensure that exists at least one
 stopped thread before running the command."
   (gdb--with-valid-session
    "Could not run command because no session is available"
-   (let* ((context-type (or (and (consp context) (car context)) context))
+   (let* ((command-parts (and command (split-string command)))
+          (context-type (or (and (consp context) (car context)) context))
           (threads (gdb--session-threads session))
           (in-frame (cond ((eq (type-of thread-or-frame) 'gdb--frame) thread-or-frame)
                           ((eq (type-of thread-or-frame) 'gdb--thread) (car (gdb--thread-frames thread-or-frame)))
@@ -564,9 +571,10 @@ stopped thread before running the command."
        (setq stopped-thread (or in-thread (car threads)))
        (gdb--command "-exec-interrupt" 'gdb--context-ignore stopped-thread))
 
-     (setq command (concat token command
+     (setq command (concat token (car command-parts)
                            (and in-thread (format " --thread %d" (gdb--thread-id   in-thread)))
-                           (and in-frame  (format " --frame  %d" (gdb--frame-level in-frame)))))
+                           (and in-frame  (format " --frame  %d" (gdb--frame-level in-frame)))
+                           " " (mapconcat #'identity (cdr command-parts) " ")))
      (gdb--debug-execute-body 'commands (message "Command %s" command))
      (comint-simple-send (gdb--session-process session) command)
 
@@ -749,6 +757,31 @@ stopped thread before running the command."
 
 
 ;; ------------------------------------------------------------------------------------------
+;; Locals buffer
+(define-derived-mode gdb--variables-mode nil "GDB Variables"
+  (setq-local buffer-read-only t)
+  (buffer-disable-undo))
+
+(gdb--simple-get-buffer gdb--variables gdb--variables-update
+  (gdb--rename-buffer "Variables")
+  (gdb--variables-mode))
+
+(defun gdb--variables-update ()
+  (gdb--with-valid-session
+   (let* ((frame (gdb--session-selected-frame session))
+          (variables (and frame (gdb--frame-variables frame)))
+          (table (make-gdb--table)))
+     (gdb--table-add-row table '("Name" "Type" "Value"))
+     (dolist (variable variables)
+       (gdb--table-add-row
+        table (list (propertize (gdb--variable-name  variable) 'face 'font-lock-variable-name-face)
+                    (propertize (gdb--variable-type  variable) 'face 'font-lock-type-face)
+                    (or         (gdb--variable-value variable) "<Composite type>"))))
+     (erase-buffer)
+     (insert (gdb--table-string table " ")))))
+
+
+;; ------------------------------------------------------------------------------------------
 ;; Source buffers
 (defun gdb--find-file (path)
   "Return the buffer of the file specified by PATH.
@@ -835,8 +868,8 @@ Create the buffer, if it wasn't already open."
 (defun gdb--extract-context (token-string)
   "Return the context-data cons assigned to TOKEN-STRING, deleting
 it from the list."
-  (let* ((context (assoc token-string gdb--token-contexts))
-         data)
+  (let ((context (assoc token-string gdb--token-contexts))
+        data)
     (when context
       (setq gdb--token-contexts (delq context gdb--token-contexts)
             context (cdr context)
@@ -896,33 +929,27 @@ it from the list."
        (setf (gdb--session-threads session) (append (gdb--session-threads session) (list thread))))
 
      (if (string= "stopped" state)
-         (gdb--command "-stack-list-frames" (cons 'gdb--context-frame-info id-str) thread)
+         (gdb--command "-stack-list-frames" (cons 'gdb--context-frame-info thread) thread)
        ;; NOTE(nox): Only update when it is running, otherwise it will update when the frame list
        ;; arrives.
        (cl-pushnew 'gdb--threads (gdb--session-buffer-types-to-update session))
        (gdb--conditional-switch thread '(no-selected-thread))))))
 
-(defun gdb--clear-thread-frames (thread-id-str)
+(defun gdb--add-frame-to-thread (thread level addr func file line-str from)
   (gdb--with-valid-session
-   (setf (gdb--thread-frames (gdb--get-thread-by-id (string-to-number thread-id-str))) nil)))
+   (push (make-gdb--frame :thread thread :level (string-to-number level) :addr addr :func func
+                          :file file :line (and line-str (string-to-number line-str)) :from from)
+         (gdb--thread-frames thread))))
 
-(defun gdb--add-frame-to-thread (thread-id-str level addr func file line-str from)
+(defun gdb--finalize-thread-frames (thread)
   (gdb--with-valid-session
-   (let ((thread (gdb--get-thread-by-id (string-to-number thread-id-str))))
-     (push (make-gdb--frame :thread thread :level (string-to-number level) :addr addr :func func
-                            :file file :line (and line-str (string-to-number line-str)) :from from)
-           (gdb--thread-frames thread)))))
+   (setf (gdb--thread-frames thread) (nreverse (gdb--thread-frames thread)))
 
-(defun gdb--finalize-thread-frames (thread-id-str)
-  (gdb--with-valid-session
-   (let ((thread (gdb--get-thread-by-id (string-to-number thread-id-str))))
-     (setf (gdb--thread-frames thread) (nreverse (gdb--thread-frames thread)))
+   (cl-pushnew 'gdb--threads (gdb--session-buffer-types-to-update session))
+   (when (eq thread (gdb--session-selected-thread session))
+     (cl-pushnew 'gdb--frames (gdb--session-buffer-types-to-update session)))
 
-     (cl-pushnew 'gdb--threads (gdb--session-buffer-types-to-update session))
-     (when (eq thread (gdb--session-selected-thread session))
-       (cl-pushnew 'gdb--frames (gdb--session-buffer-types-to-update session)))
-
-     (gdb--conditional-switch (car (gdb--thread-frames thread)) '(running same-thread)))))
+   (gdb--conditional-switch (car (gdb--thread-frames thread)) '(running same-thread))))
 
 (defun gdb--breakpoint-changed (number-str type disp enabled addr func fullname line-str at
                                            pending thread cond times what)
@@ -959,6 +986,14 @@ it from the list."
                                                             (= (gdb--breakpoint-number breakpoint) number))
                                                           (gdb--session-breakpoints session)))
    (cl-pushnew 'gdb--breakpoints (gdb--session-buffer-types-to-update session))))
+
+(defun gdb--add-variable-to-frame (frame name type value)
+  (gdb--with-valid-session
+   (push (make-gdb--variable :name name :type type :value value) (gdb--frame-variables frame))))
+
+(defun gdb--finalize-frame-variables (frame)
+  (gdb--with-valid-session
+   (cl-pushnew 'gdb--variables (gdb--session-buffer-types-to-update session))))
 
 ;; (defun gdb--set-disassembly (buffer list with-source-info)
 ;;   (when (buffer-live-p buffer)

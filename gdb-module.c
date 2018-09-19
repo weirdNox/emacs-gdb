@@ -41,12 +41,13 @@ u32 plugin_is_GPL_compatible;
         W(RunningFunc, gdb--running)                                    \
         W(GetThreadInfo, gdb--get-thread-info)                          \
         W(UpdateThread, gdb--update-thread)                             \
-        W(ClearThreadFrames, gdb--clear-thread-frames)                  \
         W(AddFrameToThread, gdb--add-frame-to-thread)                   \
         W(FinalizeThreadFrames, gdb--finalize-thread-frames)            \
         W(ThreadExited, gdb--thread-exited)                             \
         W(BreakpointChanged, gdb--breakpoint-changed)                   \
         W(BreakpointDeleted, gdb--breakpoint-deleted)                   \
+        W(AddVariableToFrame, gdb--add-variable-to-frame)                     \
+        W(FinalizeFrameVariables, gdb--finalize-frame-variables)              \
         W(SetDisassembly, gdb--set-disassembly)                         \
         W(MakeInstruction, make-gdb--instruction)                       \
         W(MakeSourceInfo, make-gdb--source-instr-info)
@@ -269,9 +270,7 @@ static void threadInfo(emacs_env *Env, mi_result *Result) {
     }
 }
 
-static void frameInfo(emacs_env *Env, mi_result *Result, emacs_value ThreadId) {
-    funcall(Env, ClearThreadFrames, 1, &ThreadId);
-
+static void frameInfo(emacs_env *Env, mi_result *Result, emacs_value Thread) {
 #define frameVariablesWriter(W) W(Level, level),    \
         W(Address, addr),                           \
         W(Function, func),                          \
@@ -288,12 +287,32 @@ static void frameInfo(emacs_env *Env, mi_result *Result, emacs_value ThreadId) {
         getBatchResultString(FrameContents, Variables, Values, arrayCount(Variables));
 
         emacs_value Args[1 + arrayCount(Variables)];
-        Args[0] = ThreadId;
+        Args[0] = Thread;
         getEmacsStrings(Env, Values, Args+1, arrayCount(Variables), false);
         funcall(Env, AddFrameToThread, arrayCount(Args), Args);
     }
 
-    funcall(Env, FinalizeThreadFrames, 1, &ThreadId);
+    funcall(Env, FinalizeThreadFrames, 1, &Thread);
+}
+
+static void getVariables(emacs_env *Env, mi_result *List, emacs_value Frame) {
+#define variablesVariablesWriter(W) W(Name, name), W(Type, type), W(Value, value)
+
+    enum { variablesVariablesWriter(writeVariableKey) };
+    char *Variables[] = { variablesVariablesWriter(writeVariableName) };
+
+    for(mi_result *Variable = List; Variable; Variable = Variable->next) {
+        mi_result *VariableContents = Variable->variant.result;
+        char *Values[arrayCount(Variables)] = {};
+        getBatchResultString(VariableContents, Variables, Values, arrayCount(Variables));
+
+        emacs_value Args[1 + arrayCount(Variables)];
+        Args[0] = Frame;
+        getEmacsStrings(Env, Values, Args+1, arrayCount(Variables), false);
+        funcall(Env, AddVariableToFrame, arrayCount(Args), Args);
+    }
+
+    funcall(Env, FinalizeFrameVariables, 1, &Frame);
 }
 
 static void disassemble(emacs_env *Env, mi_result *List, emacs_value Buffer) {
@@ -469,10 +488,11 @@ typedef struct token_context {
 
         Context_Ignore,
         Context_InitialFile,
+        Context_ThreadInfo,
+        Context_FrameInfo,
         Context_BreakpointInsert,
-        Context_threadInfo,
-        Context_frameInfo,
-        Context_disassemble,
+        Context_GetVariables,
+        Context_Disassemble,
 
         Context_Size,
     } Type;
@@ -518,15 +538,19 @@ static void handleMiResultRecord(emacs_env *Env, mi_result_record *Record, strin
                     breakpointChange(Env, getResultTuple(Result, "bkpt"));
                 } break;
 
-                case Context_threadInfo: {
+                case Context_ThreadInfo: {
                     threadInfo(Env, Result);
                 } break;
 
-                case Context_frameInfo: {
+                case Context_FrameInfo: {
                     frameInfo(Env, getResultList(Result, "stack"), Context.Data);
                 } break;
 
-                case Context_disassemble: {
+                case Context_GetVariables: {
+                    getVariables(Env, getResultList(Result, "variables"), Context.Data);
+                } break;
+
+                case Context_Disassemble: {
                     disassemble(Env, getResultList(Result, "asm_insns"), Context.Data);
                 } break;
 
