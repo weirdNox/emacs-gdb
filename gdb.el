@@ -251,7 +251,7 @@ When FRAME is in a different thread, switch to it."
          (gdb--command "-stack-list-variables --simple-values" (cons 'gdb--context-get-variables frame) frame)
        (cl-pushnew 'gdb--variables (gdb--session-buffer-types-to-update session)))
 
-     (let ((file (and frame (gdb--complete-path (gdb--frame-file frame))))
+     (let ((file (and frame (gdb--frame-file frame)))
            (line (and frame (gdb--frame-line frame))))
        (if (and file line)
            (gdb--display-source-buffer file line)
@@ -725,29 +725,19 @@ stopped thread before running the command."
 
 (defun gdb--breakpoints-update ()
   (gdb--with-valid-session
-   (gdb--remove-all-symbols session 'gdb--breakpoint-indicator t)
    (let ((breakpoints (gdb--session-breakpoints session))
          (table (make-gdb--table)))
      (gdb--table-add-row table '("Num" "Type" "Disp" "Enb" "Addr" "Hits" "What"))
      (dolist (breakpoint breakpoints)
-       (let* ((file (gdb--complete-path (gdb--breakpoint-file breakpoint)))
-              (line (gdb--breakpoint-line breakpoint))
-              (enabled (gdb--breakpoint-enabled breakpoint))
-              (enabled-disp (if enabled
-                                (eval-when-compile (propertize "y" 'font-lock-face font-lock-warning-face))
-                              (eval-when-compile (propertize "n" 'font-lock-face font-lock-comment-face)))))
+       (let ((enabled-disp (if (gdb--breakpoint-enabled breakpoint)
+                               (eval-when-compile (propertize "y" 'font-lock-face font-lock-warning-face))
+                             (eval-when-compile (propertize "n" 'font-lock-face font-lock-comment-face)))))
 
          (gdb--table-add-row table (list (number-to-string (gdb--breakpoint-number breakpoint))
                                          (gdb--breakpoint-type   breakpoint) (gdb--breakpoint-disp   breakpoint)
                                          enabled-disp                        (gdb--breakpoint-addr   breakpoint)
                                          (gdb--breakpoint-hits   breakpoint) (gdb--breakpoint-what   breakpoint))
-                             `(gdb--breakpoint ,breakpoint))
-
-         (when line (gdb--place-symbol session (gdb--find-file file) line
-                                       `((type . breakpoint-indicator)
-                                         (breakpoint . ,breakpoint)
-                                         (enabled . ,enabled)
-                                         (source . t))))))
+                             `(gdb--breakpoint ,breakpoint))))
 
      (erase-buffer)
      (insert (gdb--table-string table " ")))))
@@ -804,8 +794,8 @@ Create the buffer, if it wasn't already open."
   "Add TRAMP prefix to PATH returned from GDB output, if needed."
   (gdb--with-valid-session
    (when path
-     (with-current-buffer (gdb--comint-get-buffer session)
-       (concat (file-remote-p default-directory) path)))))
+     (concat (file-remote-p (buffer-local-value 'default-directory (gdb--comint-get-buffer session)))
+             path))))
 
 (defun gdb--display-source-buffer (file line &optional no-mark)
   "Display buffer of the selected source."
@@ -872,6 +862,13 @@ Create the buffer, if it wasn't already open."
           (when (and (eq session (overlay-get ov 'gdb--indicator-session))
                      (or (eq type 'all) (overlay-get ov type)))
             (delete-overlay ov)))))))
+
+(defun gdb--remove-breakpoint-symbol (breakpoint)
+  (let ((file (gdb--breakpoint-file breakpoint))
+        (line (gdb--breakpoint-line breakpoint)))
+    (when (and file line)
+      (with-current-buffer (gdb--find-file file)
+        (remove-overlays (point-min) (point-max) 'gdb--breakpoint breakpoint)))))
 
 
 ;; ------------------------------------------------------------------------------------------
@@ -948,8 +945,8 @@ it from the list."
 
 (defun gdb--add-frame-to-thread (thread level addr func file line-str from)
   (gdb--with-valid-session
-   (push (make-gdb--frame :thread thread :level (string-to-number level) :addr addr :func func
-                          :file file :line (and line-str (string-to-number line-str)) :from from)
+   (push (make-gdb--frame :thread thread :level (string-to-number level) :addr addr :func func  :from from
+                          :file (gdb--complete-path file) :line (and line-str (string-to-number line-str)))
          (gdb--thread-frames thread))))
 
 (defun gdb--finalize-thread-frames (thread)
@@ -962,40 +959,46 @@ it from the list."
 
    (gdb--conditional-switch (car (gdb--thread-frames thread)) '(running same-thread))))
 
-(defun gdb--breakpoint-changed (number-str type disp enabled addr func fullname line-str at
+(defun gdb--breakpoint-changed (number-str type disp enabled-str addr func fullname line-str at
                                            pending thread cond times what)
   (gdb--with-valid-session
    (let* ((number (string-to-number number-str))
+          (enabled (string= enabled-str "y"))
+          (file (gdb--complete-path fullname))
           (line (and line-str (string-to-number line-str)))
           (existing-breakpoint (cl-loop for breakpoint in (gdb--session-breakpoints session)
                                         when (= number (gdb--breakpoint-number breakpoint))
                                         return breakpoint))
           (breakpoint (or existing-breakpoint (make-gdb--breakpoint))))
 
+     (if existing-breakpoint
+         (gdb--remove-breakpoint-symbol existing-breakpoint)
+       (setf (gdb--session-breakpoints session) (append (gdb--session-breakpoints session) (list breakpoint))))
+
      (gdb--update-struct gdb--breakpoint breakpoint
-       (number number)
-       (type (or type ""))
-       (disp (or disp ""))
-       (enabled (string= enabled "y"))
-       (addr (or addr ""))
-       (hits (or times ""))
+       (number number) (type type) (disp disp) (addr addr) (hits times) (enabled )
        (what (concat (or what pending at (gdb--location-string func fullname line))
                      (and cond   (concat " if " cond))
                      (and thread (concat " on thread " thread))))
-       (file fullname)
-       (line line))
+       (file file) (line line))
 
-     (unless existing-breakpoint
-       (setf (gdb--session-breakpoints session) (append (gdb--session-breakpoints session) (list breakpoint))))
+     (when (and file line)
+       (gdb--place-symbol session (gdb--find-file file) line `((type . breakpoint-indicator)
+                                                               (breakpoint . ,breakpoint)
+                                                               (enabled . ,enabled)
+                                                               (source . t))))
 
      (cl-pushnew 'gdb--breakpoints (gdb--session-buffer-types-to-update session)))))
 
 (defun gdb--breakpoint-deleted (number)
   (gdb--with-valid-session
    (setq number (string-to-number number))
-   (setf (gdb--session-breakpoints session) (cl-delete-if (lambda (breakpoint)
-                                                            (= (gdb--breakpoint-number breakpoint) number))
-                                                          (gdb--session-breakpoints session)))
+   (setf (gdb--session-breakpoints session)
+         (cl-delete-if (lambda (breakpoint)
+                         (when (= (gdb--breakpoint-number breakpoint) number)
+                           (gdb--remove-breakpoint-symbol breakpoint)
+                           t))
+                       (gdb--session-breakpoints session)))
    (cl-pushnew 'gdb--breakpoints (gdb--session-buffer-types-to-update session))))
 
 (defun gdb--add-variable-to-frame (frame name type value)
