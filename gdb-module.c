@@ -46,8 +46,8 @@ u32 plugin_is_GPL_compatible;
         W(ThreadExited, gdb--thread-exited)                             \
         W(BreakpointChanged, gdb--breakpoint-changed)                   \
         W(BreakpointDeleted, gdb--breakpoint-deleted)                   \
-        W(AddVariableToFrame, gdb--add-variable-to-frame)                     \
-        W(FinalizeFrameVariables, gdb--finalize-frame-variables)              \
+        W(AddVariableToFrame, gdb--add-variable-to-frame)               \
+        W(FinalizeFrameVariables, gdb--finalize-frame-variables)        \
         W(SetDisassembly, gdb--set-disassembly)                         \
         W(MakeInstruction, make-gdb--instruction)                       \
         W(MakeSourceInfo, make-gdb--source-instr-info)

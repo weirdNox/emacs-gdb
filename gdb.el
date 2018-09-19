@@ -495,7 +495,8 @@ calling `gdb--table-string'."
 
 (gdb--simple-get-buffer gdb--comint ignore
   (gdb--rename-buffer "Comint")
-  (make-comint-in-buffer "GDB" buffer "gdb" nil "-i=mi" "-nx")
+  (let ((process-connection-type nil))
+    (make-comint-in-buffer "GDB" buffer "gdb" nil "-i=mi" "-nx"))
   (gdb-comint-mode)
   (setf (gdb--session-process session) (get-buffer-process buffer))
   (add-hook 'kill-buffer-hook #'gdb--important-buffer-kill-cleanup nil t))
