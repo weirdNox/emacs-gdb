@@ -916,7 +916,7 @@ it from the list."
        (cl-pushnew 'gdb--frames  (gdb--session-buffer-types-to-update session))))))
 
 (defun gdb--set-initial-file (file line-str)
-  (gdb--display-source-buffer file (string-to-number line-str) t))
+  (gdb--display-source-buffer (gdb--complete-path file) (string-to-number line-str) t))
 
 (defun gdb--get-thread-info (&optional id-str)
   (gdb--command (concat "-thread-info " id-str) 'gdb--context-thread-info))

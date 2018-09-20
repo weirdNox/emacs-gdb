@@ -9,6 +9,11 @@
 #define ignoreCase(Case) case (Case): break
 #define ignoreDefaultCase() default: break
 
+#define min(x, y) ((x) <= (y) ? (x) : (y))
+#define max(x, y) ((x) >= (y) ? (x) : (y))
+#define clampMax(X, Max) min(X, Max)
+#define clampMin(X, Min) max(X, Min)
+
 #define writeVariableKey(Key, Name, ...) Variable_##Key
 #define writeVariableName(Key, Name, ...) #Name
 #define writeElispStructKey(Key, Name, Elisp) intern(Env, ":" #Elisp)
@@ -82,47 +87,58 @@ static void *xRealloc(void *Ptr, size_t N) {
     return Result;
 }
 
-typedef struct string {
-    char *Contents;
-    u32 Len;
+typedef struct buf_header {
+    size_t Len;
     size_t Cap;
-} string;
+    char Buf[];
+} buf_header;
 
-static string allocateString() {
-    string Result = {
-        .Cap = 1<<13
-    };
-    Result.Contents = xMalloc(Result.Cap);
-    return Result;
+#define bufHdr_(B) ((buf_header *)((char *)(B) - sizeof(buf_header)))
+
+#define bufLen(B) ((B) ? bufHdr_(B)->Len : 0)
+#define bufCap(B) ((B) ? bufHdr_(B)->Cap : 0)
+#define bufEnd(B) ((B) + bufLen(B))
+#define bufSizeof(B) ((B) ? bufLen(B)*sizeof(*B) : 0)
+
+#define bufFree(B) ((B) ? (free(bufHdr_(B)), (B) = 0) : 0)
+#define bufFit(B, N) ((N) <= bufCap(B) ? 0 : ((B) = bufGrow_((B), (N), sizeof(*(B)))))
+#define bufPush(B, ...) (bufFit((B), 1 + bufLen(B)), (B)[bufHdr_(B)->Len++] = (__VA_ARGS__))
+#define bufPrintf(B, ...) ((B) = bufPrintf_((B), __VA_ARGS__))
+#define bufClear(B) ((B) ? bufHdr_(B)->Len = 0 : 0)
+
+void *bufGrow_(const void *Buf, size_t NewLen, size_t ElemSize) {
+    assert(bufCap(Buf) <= (SIZE_MAX - 1)/2);
+    size_t NewCap = clampMin(2*bufCap(Buf), clampMin(NewLen, 16));
+    assert(NewLen <= NewCap);
+    assert(NewCap <= (SIZE_MAX - sizeof(buf_header))/ElemSize);
+    size_t NewSize = offsetof(buf_header, Buf) + NewCap*ElemSize;
+    buf_header *NewHdr;
+    if(Buf) {
+        NewHdr = xRealloc(bufHdr_(Buf), NewSize);
+    } else {
+        NewHdr = xMalloc(NewSize);
+        NewHdr->Len = 0;
+    }
+    NewHdr->Cap = NewCap;
+    return NewHdr->Buf;
 }
 
-static void pushString(string *Str, char *Format, ...) {
-    if(Str && Str->Contents && Format) {
-        va_list Args;
-        va_start(Args, Format);
-        size_t Avail = Str->Cap - Str->Len;
-        size_t NewLen  = 1 + vsnprintf(Str->Contents + Str->Len, Avail, Format, Args);
+char *bufPrintf_(char *Buf, const char *Fmt, ...) {
+    va_list Args;
+    va_start(Args, Fmt);
+    size_t Available = bufCap(Buf) - bufLen(Buf);
+    size_t N = 1 + vsnprintf(bufEnd(Buf), Available, Fmt, Args);
+    va_end(Args);
+    if(N > Available) {
+        bufFit(Buf, N + bufLen(Buf));
+        va_start(Args, Fmt);
+        Available = bufCap(Buf) - bufLen(Buf);
+        N = 1 + vsnprintf(bufEnd(Buf), Available, Fmt, Args);
+        assert(N <= Available);
         va_end(Args);
-
-        if(NewLen > Avail) {
-            Str->Cap += NewLen + (1<<10);
-            Str->Contents = xRealloc(Str->Contents, Str->Cap);
-
-            va_start(Args, Format);
-            size_t NewAvail = Str->Cap - Str->Len;
-            NewLen  = 1 + vsnprintf(Str->Contents + Str->Len, NewAvail, Format, Args);
-            va_end(Args);
-        }
-
-        Str->Len += NewLen - 1;
     }
-}
-
-static void freeString(string *Str) {
-    if(Str && Str->Contents) {
-        free(Str->Contents);
-        *Str = (string){};
-    }
+    bufHdr_(Buf)->Len += N - 1;
+    return Buf;
 }
 
 static void gdbWireCallback(void *Ctx, mi_output *Output) {
@@ -388,7 +404,7 @@ static void disassemble(emacs_env *Env, mi_result *List, emacs_value Buffer) {
     }
 }
 
-static void miAsyncStopped(emacs_env *Env, mi_result *Result, string *PrintString) {
+static void miAsyncStopped(emacs_env *Env, mi_result *Result, char **PrintString) {
     for(mi_result *Iter = Result; Iter; Iter = Iter->next) {
         if(Iter->variable && strcmp(Iter->variable, "stopped-threads") == 0) {
             if(Iter->kind == GDBWIRE_MI_CSTRING) {
@@ -405,10 +421,10 @@ static void miAsyncStopped(emacs_env *Env, mi_result *Result, string *PrintStrin
     }
 
     // NOTE(nox): *stopped does not end with a prompt...
-    pushString(PrintString, "(gdb) ");
+    bufPrintf(*PrintString, "(gdb) ");
 }
 
-static void handleMiOobRecord(emacs_env *Env, mi_oob_record *Record, string *PrintString) {
+static void handleMiOobRecord(emacs_env *Env, mi_oob_record *Record, char **PrintString) {
     switch(Record->kind) {
         case GDBWIRE_MI_ASYNC: {
             mi_async_record *AsyncRecord = Record->variant.async_record;
@@ -464,12 +480,12 @@ static void handleMiOobRecord(emacs_env *Env, mi_oob_record *Record, string *Pri
             mi_stream_record *StreamRecord = Record->variant.stream_record;
             switch(StreamRecord->kind) {
                 case GDBWIRE_MI_CONSOLE: {
-                    pushString(PrintString, "%s", StreamRecord->cstring);
+                    bufPrintf(*PrintString, "%s", StreamRecord->cstring);
                 } break;
 
                 case GDBWIRE_MI_TARGET: {
                     // TODO(nox): If we are outputting to another tty, will we ever receive this?
-                    pushString(PrintString, "Target: %s", StreamRecord->cstring);
+                    bufPrintf(*PrintString, "Target: %s", StreamRecord->cstring);
                 } break;
 
                 ignoreCase(GDBWIRE_MI_LOG);
@@ -510,7 +526,7 @@ static token_context getTokenContext(emacs_env *Env, char *TokenString) {
     return Result;
 }
 
-static void handleMiResultRecord(emacs_env *Env, mi_result_record *Record, string *PrintString) {
+static void handleMiResultRecord(emacs_env *Env, mi_result_record *Record, char **PrintString) {
     token_context Context = getTokenContext(Env, Record->token);
 
     mi_result *Result = Record->result;
@@ -562,18 +578,18 @@ static void handleMiResultRecord(emacs_env *Env, mi_result_record *Record, strin
                 default: {
                     char *Message = getResultString(Result, "msg");
                     if(Message) {
-                        pushString(PrintString, "%s\n", Result->variant.cstring);
+                        bufPrintf(*PrintString, "%s\n", Result->variant.cstring);
                     }
                 } break;
             }
         } break;
 
         case GDBWIRE_MI_EXIT: {
-            pushString(PrintString, "Bye bye :)\n");
+            bufPrintf(*PrintString, "Bye bye :)\n");
         } break;
 
         case GDBWIRE_MI_UNSUPPORTED: {
-            pushString(PrintString, "Error while parsing, GdbWire couldn't figure out class of result record!");
+            bufPrintf(*PrintString, "Error while parsing, GdbWire couldn't figure out class of result record!");
         } break;
     }
 
@@ -597,7 +613,7 @@ static emacs_value handleGdbMiOutput(emacs_env *Env, ptrdiff_t NumberOfArgs,
     gdbwire_mi_parser_push(GdbMiParser, OutputString);
     free(OutputString);
 
-    string PrintString = allocateString();
+    char *PrintString = 0;
     for(mi_output *Output = ParserOutput; Output; Output = Output->next) {
         switch(Output->kind) {
             case GDBWIRE_MI_OUTPUT_OOB: {
@@ -609,14 +625,13 @@ static emacs_value handleGdbMiOutput(emacs_env *Env, ptrdiff_t NumberOfArgs,
             } break;
 
             case GDBWIRE_MI_OUTPUT_PARSE_ERROR: {
-                pushString(&PrintString, "An error occurred on token %s\n",
-                           Output->variant.error.token);
+                bufPrintf(PrintString, "An error occurred on token %s\n", Output->variant.error.token);
             } break;
 
             case GDBWIRE_MI_OUTPUT_PROMPT: {
                 if(!IgnoreNextPrompt)
                 {
-                    pushString(&PrintString, "(gdb) ");
+                    bufPrintf(PrintString, "(gdb) ");
                 }
                 IgnoreNextPrompt = false;
             } break;
@@ -625,8 +640,8 @@ static emacs_value handleGdbMiOutput(emacs_env *Env, ptrdiff_t NumberOfArgs,
     gdbwire_mi_output_free(ParserOutput);
     ParserOutput = 0;
 
-    emacs_value Result = Env->make_string(Env, PrintString.Contents, PrintString.Len);
-    freeString(&PrintString);
+    emacs_value Result = Env->make_string(Env, PrintString, bufLen(PrintString));
+    bufFree(PrintString);
 
     return Result;
 }
