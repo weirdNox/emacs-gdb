@@ -950,15 +950,14 @@ it from the list."
        (cl-pushnew 'gdb--threads (gdb--session-buffer-types-to-update session))
        (gdb--conditional-switch thread '(no-selected-thread))))))
 
-(defun gdb--add-frame-to-thread (thread level addr func file line-str from)
+(defun gdb--add-frames-to-thread (thread &rest args)
   (gdb--with-valid-session
-   (push (make-gdb--frame :thread thread :level (string-to-number level) :addr addr :func func  :from from
-                          :file (gdb--complete-path file) :line (and line-str (string-to-number line-str)))
-         (gdb--thread-frames thread))))
-
-(defun gdb--finalize-thread-frames (thread)
-  (gdb--with-valid-session
-   (setf (gdb--thread-frames thread) (nreverse (gdb--thread-frames thread)))
+   (cl-loop for (level-str addr func file line-str from) in args
+            do (push (make-gdb--frame
+                      :thread thread :level (string-to-number level-str) :addr addr :func func  :from from
+                      :file (gdb--complete-path file) :line (and line-str (string-to-number line-str)))
+                     (gdb--thread-frames thread))
+            finally do (setf (gdb--thread-frames thread) (nreverse (gdb--thread-frames thread))))
 
    (cl-pushnew 'gdb--threads (gdb--session-buffer-types-to-update session))
    (when (eq thread (gdb--session-selected-thread session))
@@ -1008,12 +1007,10 @@ it from the list."
                        (gdb--session-breakpoints session)))
    (cl-pushnew 'gdb--breakpoints (gdb--session-buffer-types-to-update session))))
 
-(defun gdb--add-variable-to-frame (frame name type value)
+(defun gdb--add-variables-to-frame (frame &rest args)
   (gdb--with-valid-session
-   (push (make-gdb--variable :name name :type type :value value) (gdb--frame-variables frame))))
-
-(defun gdb--finalize-frame-variables (frame)
-  (gdb--with-valid-session
+   (cl-loop for (name type value) in args
+            do (push (make-gdb--variable :name name :type type :value value) (gdb--frame-variables frame)))
    (cl-pushnew 'gdb--variables (gdb--session-buffer-types-to-update session))))
 
 ;; (defun gdb--set-disassembly (buffer list with-source-info)

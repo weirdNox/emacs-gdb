@@ -14,8 +14,10 @@
 #define clampMax(X, Max) min(X, Max)
 #define clampMin(X, Min) max(X, Min)
 
-#define writeVariableKey(Key, Name, ...) Variable_##Key
-#define writeVariableName(Key, Name, ...) #Name
+#define writeResultKey(Key, Name, ...) Result_##Key
+#define enumWriter(ResultVariables) enum { ResultVariables(writeResultKey), Result_Count}
+#define writeGdbName(Key, Name, ...) #Name
+#define gdbNamesWriter(Name, ResultVariables) char *Name[] = { ResultVariables(writeGdbName) }
 #define writeElispStructKey(Key, Name, Elisp) intern(Env, ":" #Elisp)
 
 typedef uint8_t  u8;
@@ -41,30 +43,29 @@ typedef struct gdbwire_mi_parser_callbacks gdbwire_callbacks;
 
 u32 plugin_is_GPL_compatible;
 
-#define apiFunctionsWriter(W) W(ExtractContext, gdb--extract-context)   \
+#define internWriter(W) W(Nil, nil)                                     \
+        W(T, t)                                                         \
+        W(ListFunc, list)                                               \
+        W(ExtractContext, gdb--extract-context)                         \
         W(SetInitialFile, gdb--set-initial-file)                        \
         W(RunningFunc, gdb--running)                                    \
         W(GetThreadInfo, gdb--get-thread-info)                          \
         W(UpdateThread, gdb--update-thread)                             \
-        W(AddFrameToThread, gdb--add-frame-to-thread)                   \
-        W(FinalizeThreadFrames, gdb--finalize-thread-frames)            \
+        W(AddFramesToThread, gdb--add-frames-to-thread)                 \
         W(ThreadExited, gdb--thread-exited)                             \
         W(BreakpointChanged, gdb--breakpoint-changed)                   \
         W(BreakpointDeleted, gdb--breakpoint-deleted)                   \
-        W(AddVariableToFrame, gdb--add-variable-to-frame)               \
-        W(FinalizeFrameVariables, gdb--finalize-frame-variables)        \
+        W(AddVariablesToFrame, gdb--add-variables-to-frame)             \
         W(SetDisassembly, gdb--set-disassembly)                         \
         W(MakeInstruction, make-gdb--instruction)                       \
         W(MakeSourceInfo, make-gdb--source-instr-info)
     ; // Weird indentation...
 
-#define apiFunctionVariableWriter(Name, ...) static emacs_value Name;
-#define apiFunctionInternWriter(Name, ElispName) Name = intern(Env, #ElispName);
+#define internVariableWriter(Name, ...) static emacs_value Name;
+#define internSetterWriter(Name, ElispName) Name = intern(Env, #ElispName);
 
-apiFunctionsWriter(apiFunctionVariableWriter);
+internWriter(internVariableWriter);
 
-static emacs_value Nil;
-static emacs_value T;
 static struct gdbwire_mi_parser *GdbMiParser;
 static mi_output *ParserOutput;
 static bool IgnoreNextPrompt;
@@ -246,9 +247,9 @@ static void breakpointChange(emacs_env *Env, mi_result *Breakpoint) {
         W(Times, times),                                \
         W(What, what)
 
-    enum { breakpointVariablesWriter(writeVariableKey) };
+    enum { breakpointVariablesWriter(writeResultKey) };
 
-    char *Variables[] = { breakpointVariablesWriter(writeVariableName) };
+    char *Variables[] = { breakpointVariablesWriter(writeGdbName) };
     char *Values[arrayCount(Variables)] = {};
     getBatchResultString(Breakpoint, Variables, Values, arrayCount(Variables));
 
@@ -271,8 +272,8 @@ static void threadInfo(emacs_env *Env, mi_result *Result) {
         W(State, state),                        \
         W(Core, core)
 
-    enum { threadVariablesWriter(writeVariableKey) };
-    char *Variables[] = { threadVariablesWriter(writeVariableName) };
+    enum { threadVariablesWriter(writeResultKey) };
+    char *Variables[] = { threadVariablesWriter(writeGdbName) };
 
     for(mi_result *Thread = Threads; Thread && Thread->kind == GDBWIRE_MI_TUPLE; Thread = Thread->next) {
         mi_result *ThreadContents = Thread->variant.result;
@@ -285,57 +286,63 @@ static void threadInfo(emacs_env *Env, mi_result *Result) {
     }
 }
 
-static void frameInfo(emacs_env *Env, mi_result *Result, emacs_value Thread) {
-#define frameVariablesWriter(W) W(Level, level),    \
+static void frameInfo(emacs_env *Env, mi_result *List, emacs_value Thread) {
+    emacs_value *Args = 0;
+    bufPush(Args, Thread);
+
+#define resultVariables(W) W(Level, level),         \
         W(Address, addr),                           \
         W(Function, func),                          \
         W(File, fullname),                          \
         W(Line, line),                              \
         W(From, from)
+    gdbNamesWriter(GdbNames, resultVariables);
+    enumWriter(resultVariables);
+#undef resultVariables
 
-    enum { frameVariablesWriter(writeVariableKey) };
-    char *Variables[] = { frameVariablesWriter(writeVariableName) };
+    for(mi_result *Frame = List; Frame; Frame = Frame->next) {
+        char *Values[Result_Count] = {};
+        mi_result *Tuple = Frame->variant.result;
+        getBatchResultString(Tuple, GdbNames, Values, Result_Count);
 
-    for(mi_result *Frame = Result; Frame; Frame = Frame->next) {
-        mi_result *FrameContents = Frame->variant.result;
-        char *Values[arrayCount(Variables)] = {};
-        getBatchResultString(FrameContents, Variables, Values, arrayCount(Variables));
-
-        emacs_value Args[1 + arrayCount(Variables)];
-        Args[0] = Thread;
-        getEmacsStrings(Env, Values, Args+1, arrayCount(Variables), false);
-        funcall(Env, AddFrameToThread, arrayCount(Args), Args);
+        emacs_value ListValues[Result_Count];
+        getEmacsStrings(Env, Values, ListValues, Result_Count, false);
+        bufPush(Args, funcall(Env, ListFunc, Result_Count, ListValues));
     }
 
-    funcall(Env, FinalizeThreadFrames, 1, &Thread);
+    funcall(Env, AddFramesToThread, bufLen(Args), Args);
+    bufFree(Args);
 }
 
 static void getVariables(emacs_env *Env, mi_result *List, emacs_value Frame) {
-#define variablesVariablesWriter(W) W(Name, name), W(Type, type), W(Value, value)
+    emacs_value *Args = 0;
+    bufPush(Args, Frame);
 
-    enum { variablesVariablesWriter(writeVariableKey) };
-    char *Variables[] = { variablesVariablesWriter(writeVariableName) };
+#define resultVariables(W) W(Name, name), W(Type, type), W(Value, value)
+    gdbNamesWriter(GdbNames, resultVariables);
+    enumWriter(resultVariables);
+#undef  resultVariables
 
     for(mi_result *Variable = List; Variable; Variable = Variable->next) {
-        mi_result *VariableContents = Variable->variant.result;
-        char *Values[arrayCount(Variables)] = {};
-        getBatchResultString(VariableContents, Variables, Values, arrayCount(Variables));
+        char *Values[Result_Count] = {};
+        mi_result *Tuple = Variable->variant.result;
+        getBatchResultString(Tuple, GdbNames, Values, Result_Count);
 
-        emacs_value Args[1 + arrayCount(Variables)];
-        Args[0] = Frame;
-        getEmacsStrings(Env, Values, Args+1, arrayCount(Variables), false);
-        funcall(Env, AddVariableToFrame, arrayCount(Args), Args);
+        emacs_value ListValues[Result_Count];
+        getEmacsStrings(Env, Values, ListValues, Result_Count, false);
+        bufPush(Args, funcall(Env, ListFunc, Result_Count, ListValues));
     }
 
-    funcall(Env, FinalizeFrameVariables, 1, &Frame);
+    funcall(Env, AddVariablesToFrame, bufLen(Args), Args);
+    bufFree(Args);
 }
 
 static void disassemble(emacs_env *Env, mi_result *List, emacs_value Buffer) {
 
 #define sourceInfoVariablesWriter(W) W(Line, line, line), W(File, fullname, file)
 
-    enum { sourceInfoVariablesWriter(writeVariableKey) };
-    char *SourceVariables[] = { sourceInfoVariablesWriter(writeVariableName) };
+    enum { sourceInfoVariablesWriter(writeResultKey) };
+    char *SourceVariables[] = { sourceInfoVariablesWriter(writeGdbName) };
     emacs_value SourceInfoElispKeys[] = { sourceInfoVariablesWriter(writeElispStructKey) };
 
 #define instructionVariablesWriter(W) W(Address, address, address), \
@@ -343,8 +350,8 @@ static void disassemble(emacs_env *Env, mi_result *List, emacs_value Buffer) {
         W(Offset, offset, offset),                                  \
         W(Instruction, inst, instruction)
 
-    enum { instructionVariablesWriter(writeVariableKey) };
-    char *InstructionVariables[] = { instructionVariablesWriter(writeVariableName) };
+    enum { instructionVariablesWriter(writeResultKey) };
+    char *InstructionVariables[] = { instructionVariablesWriter(writeGdbName) };
     emacs_value InstructionElispKeys[] = { instructionVariablesWriter(writeElispStructKey) };
 
     bool HasSourceInfo = !strcmp(List->variable, "src_and_asm_line");
@@ -649,7 +656,7 @@ static emacs_value handleGdbMiOutput(emacs_env *Env, ptrdiff_t NumberOfArgs,
 s32 emacs_module_init(emacs_runtime *EmacsRuntime) {
     emacs_env *Env = EmacsRuntime->get_environment(EmacsRuntime);
 
-    apiFunctionsWriter(apiFunctionInternWriter);
+    internWriter(internSetterWriter);
 
     emacs_value Args[2];
     Args[0] = intern(Env, HANDLE_GDB_MI_OUTPUT_NAME);
@@ -658,9 +665,6 @@ s32 emacs_module_init(emacs_runtime *EmacsRuntime) {
 
     gdbwire_callbacks Callbacks = {0, gdbWireCallback};
     GdbMiParser = gdbwire_mi_parser_create(Callbacks);
-
-    Nil = intern(Env, "nil");
-    T = intern(Env, "t");
 
     emacs_value Feature = intern(Env, "gdb-module");
     internFuncall(Env, "provide", 1, &Feature);
