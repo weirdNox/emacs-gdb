@@ -46,10 +46,11 @@ This can also be set to t, which means that all debug components are active.")
   '(gdb--context-ignore
     gdb--context-initial-file
     gdb--context-thread-info
-    gdb--context-frame-info     ;; Data: Thread
+    gdb--context-frame-info      ;; Data: Thread
     gdb--context-breakpoint-insert
-    gdb--context-get-variables  ;; Data: Frame
-    gdb--context-disassemble    ;; Data: Disassemble buffer
+    gdb--context-get-variables   ;; Data: Frame
+    gdb--context-create-variable
+    gdb--context-disassemble     ;; Data: Disassemble buffer
     )
   "List of implemented token contexts.
 Must be in the same order of the `token_context' enum in the
@@ -88,7 +89,7 @@ breakpoint of TYPE.")
   frame process buffers source-window
   (buffer-types-to-update gdb--buffer-types) buffers-to-update
   threads selected-thread selected-frame
-  breakpoints)
+  breakpoints watched-variables)
 (defvar gdb--sessions nil
   "List of active sessions.")
 
@@ -777,17 +778,18 @@ stopped thread before running the command."
 
 ;; ------------------------------------------------------------------------------------------
 ;; Watcher buffers
-;; (define-derived-mode gdb--watcher-mode nil "GDB Watcher"
-;;   (setq-local buffer-read-only t)
-;;   (buffer-disable-undo))
+(define-derived-mode gdb--watcher-mode nil "GDB Watcher"
+  (setq-local buffer-read-only t)
+  (buffer-disable-undo))
 
-;; (gdb--simple-get-buffer gdb--watcher gdb--watcher-update
-;;   (gdb--rename-buffer "Watcher")
-;;   (gdb--watcher-mode))
+(gdb--simple-get-buffer gdb--watcher gdb--watcher-update
+  (gdb--rename-buffer "Watcher")
+  (gdb--watcher-mode))
 
-;; (defun gdb--watcher-update ()
-;;   (gdb--with-valid-session
-;;    ))
+(defun gdb--watcher-update ()
+  (gdb--with-valid-session
+   ))
+
 
 ;; ------------------------------------------------------------------------------------------
 ;; Source buffers
@@ -1023,6 +1025,17 @@ it from the list."
 
 ;; ------------------------------------------------------------------------------------------
 ;; User commands
+(defun gdb-watch-expression ()
+  (interactive)
+  (gdb--with-valid-session
+   (let ((expression (replace-regexp-in-string "\\(\\`[ \t\r\n]+\\|[ \t\r\n]+\\'\\)" ""
+                                               (read-string "Expression: "))))
+     (when (> (length expression) 0)
+       (setq expression (replace-regexp-in-string "\n+" " " expression)
+             expression (format "\"%s\"" (replace-regexp-in-string "[ \t\n]+" " " expression)))
+       (gdb--command (concat "-var-create - * " expression) 'gdb--context-create-variable
+                     (gdb--session-selected-thread session))))))
+
 (defun gdb-kill-session ()
   "Kill current GDB session."
   (interactive)
