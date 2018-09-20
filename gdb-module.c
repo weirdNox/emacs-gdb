@@ -58,6 +58,7 @@ u32 plugin_is_GPL_compatible;
         W(BreakpointDeleted, gdb--breakpoint-deleted)                   \
         W(AddVariablesToFrame, gdb--add-variables-to-frame)             \
         W(NewVariableInfo, gdb--new-variable-info)                      \
+        W(VariableUpdateInfo, gdb--variable-update-info)                \
         W(SetDisassembly, gdb--set-disassembly)                         \
         W(MakeInstruction, make-gdb--instruction)                       \
         W(MakeSourceInfo, make-gdb--source-instr-info)
@@ -298,6 +299,7 @@ static void frameInfo(emacs_env *Env, mi_result *List, emacs_value Thread) {
         W(File, fullname),                          \
         W(Line, line),                              \
         W(From, from)
+
     gdbNamesWriter(GdbNames, resultVariables);
     enumWriter(resultVariables);
 #undef resultVariables
@@ -341,11 +343,11 @@ static void getVariables(emacs_env *Env, mi_result *List, emacs_value Frame) {
 
 static void createVariable(emacs_env *Env, mi_result *Tuple) {
 #define resultVariables(W) W(Name, name),                               \
-        W(NumChild, numChild),                                          \
-        W(Func, func),                                                  \
-        W(File, fullname),                                              \
-        W(Line, line),                                                  \
-        W(From, from)
+        W(NumChild, numchild),                                          \
+        W(Value, value),                                                \
+        W(Type, type),                                                  \
+        W(ThreadId, thread-id)
+
     gdbNamesWriter(GdbNames, resultVariables);
     enumWriter(resultVariables);
 #undef resultVariables
@@ -356,6 +358,34 @@ static void createVariable(emacs_env *Env, mi_result *Tuple) {
     emacs_value Args[Result_Count];
     getEmacsStrings(Env, Values, Args, Result_Count, false);
     funcall(Env, NewVariableInfo, arrayCount(Args), Args);
+}
+
+static void updateVariables(emacs_env *Env, mi_result *List) {
+    emacs_value *Args = 0;
+
+#define resultVariables(W) W(Name, name),       \
+        W(Value, value),                        \
+        W(InScope, in_scope),                   \
+        W(TypeChanged, type_changed),           \
+        W(NewType, new_type),                   \
+        W(NewNumChildren, new_num_children)
+
+    gdbNamesWriter(GdbNames, resultVariables);
+    enumWriter(resultVariables);
+#undef  resultVariables
+
+    for(mi_result *Variable = List; Variable; Variable = Variable->next) {
+        char *Values[Result_Count] = {};
+        mi_result *Tuple = Variable->variant.result;
+        getBatchResultString(Tuple, GdbNames, Values, Result_Count);
+
+        emacs_value ListValues[Result_Count];
+        getEmacsStrings(Env, Values, ListValues, Result_Count, false);
+        bufPush(Args, funcall(Env, ListFunc, Result_Count, ListValues));
+    }
+
+    funcall(Env, VariableUpdateInfo, bufLen(Args), Args);
+    bufFree(Args);
 }
 
 static void disassemble(emacs_env *Env, mi_result *List, emacs_value Buffer) {
@@ -532,7 +562,8 @@ typedef struct token_context {
         Context_FrameInfo,
         Context_BreakpointInsert,
         Context_GetVariables,
-        Context_CreateVariable,
+        Context_VariableCreate,
+        Context_VariableUpdate,
         Context_Disassemble,
 
         Context_Size,
@@ -591,8 +622,12 @@ static void handleMiResultRecord(emacs_env *Env, mi_result_record *Record, char 
                     getVariables(Env, getResultList(Result, "variables"), Context.Data);
                 } break;
 
-                case Context_CreateVariable: {
+                case Context_VariableCreate: {
                     createVariable(Env, Result);
+                } break;
+
+                case Context_VariableUpdate: {
+                    updateVariables(Env, getResultList(Result, "changelist"));
                 } break;
 
                 case Context_Disassemble: {

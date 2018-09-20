@@ -49,7 +49,8 @@ This can also be set to t, which means that all debug components are active.")
     gdb--context-frame-info      ;; Data: Thread
     gdb--context-breakpoint-insert
     gdb--context-get-variables   ;; Data: Frame
-    gdb--context-create-variable
+    gdb--context-variable-create
+    gdb--context-variable-update
     gdb--context-disassemble     ;; Data: Disassemble buffer
     )
   "List of implemented token contexts.
@@ -73,7 +74,6 @@ dynamic module.")
 
 (cl-defstruct gdb--thread id target-id name state frames core)
 (cl-defstruct gdb--frame thread level addr func file line from variables)
-(cl-defstruct gdb--variable name type value)
 
 (cl-defstruct gdb--breakpoint number type disp enabled addr hits what file line)
 (defconst gdb--available-breakpoint-types
@@ -85,11 +85,14 @@ dynamic module.")
 Both are strings. FLAGS are the flags to be passed to -break-insert in order to create a
 breakpoint of TYPE.")
 
+(cl-defstruct gdb--variable name type value)
+(cl-defstruct gdb--watched-var name type value thread parent children-count children flag)
+
 (cl-defstruct gdb--session
   frame process buffers source-window
-  (buffer-types-to-update gdb--buffer-types) buffers-to-update
+  buffer-types-to-update buffers-to-update
   threads selected-thread selected-frame
-  breakpoints watched-variables)
+  breakpoints watched-vars)
 (defvar gdb--sessions nil
   "List of active sessions.")
 
@@ -195,30 +198,11 @@ This is shared among all sessions.")
 
     (gdb--remove-all-symbols session 'all)))
 
-(defun gdb--update-buffer (buffer)
-  (with-current-buffer buffer
-    (let ((func (gdb--buffer-info-update-func gdb--buffer-info)))
-      (cl-assert (fboundp func))
-      (gdb--measure-time (concat "Calling " (symbol-name func)) (funcall func)))))
-
-(defun gdb--update ()
-  (gdb--with-valid-session
-   (let ((inhibit-read-only t)
-         (buffers-to-update (gdb--session-buffers-to-update session))
-         (types-to-update   (gdb--session-buffer-types-to-update session)))
-     (dolist (buffer (gdb--session-buffers session))
-       (when (or (memq buffer buffers-to-update)
-                 (memq (gdb--buffer-info-type (buffer-local-value 'gdb--buffer-info buffer))
-                       types-to-update))
-         (gdb--update-buffer buffer)))
-
-     (setf (gdb--session-buffers-to-update session) nil
-           (gdb--session-buffer-types-to-update session) nil))))
-
 (defun gdb--get-thread-by-id (id)
   (gdb--with-valid-session
-   (cl-loop for thread in (gdb--session-threads session)
-            when (= (gdb--thread-id thread) id) return thread)))
+   (when id
+     (cl-loop for thread in (gdb--session-threads session)
+              when (= (gdb--thread-id thread) id) return thread))))
 
 (defun gdb--switch-to-thread (thread)
   "Unconditionally switch to _different_ THREAD. This will also switch to the top level frame.
@@ -418,7 +402,28 @@ If WITH-HEADER is set, then the first row is used as header. The table contents 
                   (setq gdb--buffer-info
                         (make-gdb--buffer-info :session session :type ',type :update-func #',update-func)))
                 (push buffer (gdb--session-buffers session))
+                (gdb--update-buffer buffer)
                 buffer)))))
+
+(defun gdb--update-buffer (buffer)
+  (with-current-buffer buffer
+    (let ((func (gdb--buffer-info-update-func gdb--buffer-info)))
+      (cl-assert (fboundp func))
+      (gdb--measure-time (concat "Calling " (symbol-name func)) (funcall func)))))
+
+(defun gdb--update ()
+  (gdb--with-valid-session
+   (let ((inhibit-read-only t)
+         (buffers-to-update (gdb--session-buffers-to-update session))
+         (types-to-update   (gdb--session-buffer-types-to-update session)))
+     (dolist (buffer (gdb--session-buffers session))
+       (when (or (memq buffer buffers-to-update)
+                 (memq (gdb--buffer-info-type (buffer-local-value 'gdb--buffer-info buffer))
+                       types-to-update))
+         (gdb--update-buffer buffer)))
+
+     (setf (gdb--session-buffers-to-update session) nil
+           (gdb--session-buffer-types-to-update session) nil))))
 
 (defmacro gdb--rename-buffer (&optional specific-str)
   `(save-match-data
@@ -674,9 +679,9 @@ stopped thread before running the command."
              (core (gdb--thread-core thread)))
          (gdb--table-add-row table (list id-str target-id name state-display core frame-str)
                              `(gdb--thread ,thread))
-         (setq count (1+ count))
          (when (eq selected-thread thread) (setq selected-thread-line count))
-         (when (eq cursor-on-thread thread) (setq cursor-on-line count))))
+         (when (eq cursor-on-thread thread) (setq cursor-on-line count))
+         (setq count (1+ count))))
 
      (remove-overlays nil nil 'gdb--thread-indicator t)
      (gdb--table-insert table t)
@@ -711,9 +716,9 @@ stopped thread before running the command."
              (addr (gdb--frame-addr frame))
              (where (gdb--frame-location-string frame)))
          (gdb--table-add-row table (list level-str addr where) (list 'gdb--frame frame))
-         (setq count (1+ count))
          (when (eq selected-frame frame)  (setq selected-frame-line count))
-         (when (eq cursor-on-frame frame) (setq cursor-on-line count))))
+         (when (eq cursor-on-frame frame) (setq cursor-on-line count))
+         (setq count (1+ count))))
 
      (remove-overlays nil nil 'gdb--frame-indicator t)
      (gdb--table-insert table t)
@@ -788,7 +793,7 @@ stopped thread before running the command."
 
 (defun gdb--watcher-update ()
   (gdb--with-valid-session
-   ))
+   (erase-buffer)))
 
 
 ;; ------------------------------------------------------------------------------------------
@@ -945,12 +950,16 @@ it from the list."
      (unless existing-thread
        (setf (gdb--session-threads session) (append (gdb--session-threads session) (list thread))))
 
-     (if (string= "stopped" state)
-         (gdb--command "-stack-list-frames" (cons 'gdb--context-frame-info thread) thread)
+     (cond
+      ((string= "stopped" state)
+       (gdb--command "-stack-list-frames" (cons 'gdb--context-frame-info thread) thread)
+       (gdb--command "-var-update --all-values *" 'gdb--context-variable-update thread))
+
+      (t
        ;; NOTE(nox): Only update when it is running, otherwise it will update when the frame list
        ;; arrives.
        (cl-pushnew 'gdb--threads (gdb--session-buffer-types-to-update session))
-       (gdb--conditional-switch thread '(no-selected-thread))))))
+       (gdb--conditional-switch thread '(no-selected-thread)))))))
 
 (defun gdb--add-frames-to-thread (thread &rest args)
   (gdb--with-valid-session
@@ -1015,6 +1024,36 @@ it from the list."
             do (push (make-gdb--variable :name name :type type :value value) (gdb--frame-variables frame)))
    (cl-pushnew 'gdb--variables (gdb--session-buffer-types-to-update session))))
 
+(defun gdb--new-variable-info (name num-child value type thread-id)
+  (gdb--with-valid-session
+   (let ((expr (make-gdb--watched-var
+                :name name :children-count (and num-child (string-to-number num-child)) :value value
+                :type type :thread (and thread-id (gdb--get-thread-by-id (string-to-number thread-id))))))
+     (puthash name expr (gdb--session-watched-vars session)))))
+
+(defun gdb--variable-update-info (&rest args)
+  (gdb--with-valid-session
+   (cl-loop for (name value in-scope type-changed new-type new-children-count) in args
+            do
+            (let ((var (gethash name (gdb--session-watched-vars session))))
+              (cond ((string= in-scope "true")
+                     (when (string= type-changed "true")
+                       ;; TODO(nox): Delete all children
+                       (setf (gdb--watched-var-type var) new-type
+                             (gdb--watched-var-children-count session)
+                             (and new-children-count (string-to-number new-children-count))))
+
+                     (setf (gdb--watched-var-value var) value
+                           (gdb--watched-var-flag  var) 'modified))
+
+                    ((string= in-scope "false")
+                     (setf (gdb--watched-var-value var) nil
+                           (gdb--watched-var-flag  var) 'out-of-scope))
+
+                    (t
+                     ;; TODO(nox): Delete this variable
+                     ))))))
+
 ;; (defun gdb--set-disassembly (buffer list with-source-info)
 ;;   (when (buffer-live-p buffer)
 ;;     (with-current-buffer buffer
@@ -1033,7 +1072,7 @@ it from the list."
      (when (> (length expression) 0)
        (setq expression (replace-regexp-in-string "\n+" " " expression)
              expression (format "\"%s\"" (replace-regexp-in-string "[ \t\n]+" " " expression)))
-       (gdb--command (concat "-var-create - * " expression) 'gdb--context-create-variable
+       (gdb--command (concat "-var-create - * " expression) 'gdb--context-variable-create
                      (gdb--session-selected-thread session))))))
 
 (defun gdb-kill-session ()
@@ -1044,7 +1083,7 @@ it from the list."
 ;;;###autoload
 (defun gdb-create-session ()
   (interactive)
-  (let* ((session (make-gdb--session))
+  (let* ((session (make-gdb--session :watched-vars (make-hash-table :test 'equal)))
          (frame (gdb--create-frame session)))
     (push session gdb--sessions)
 
