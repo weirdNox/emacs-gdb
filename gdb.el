@@ -332,53 +332,84 @@ All embedded quotes, newlines, and backslashes are preceded with a backslash."
 
 ;; ------------------------------------------------------------------------------------------
 ;; Tables
+(cl-defstruct gdb--table header rows column-sizes)
+(cl-defstruct gdb--table-row table columns properties level has-children)
+
 (defsubst gdb--pad-string (string padding) (format (concat "%" (number-to-string padding) "s") (or string "")))
 
-(cl-defstruct gdb--table column-sizes rows row-properties right-align)
+(defun gdb--table-update-column-sizes (table columns &optional level has-children)
+  "Update TABLE column sizes to include new COLUMNS.
+LEVEL should be an integer specifying the indentation level."
+  (unless (gdb--table-column-sizes table)
+    (setf (gdb--table-column-sizes table) (make-list (length columns) 0)))
 
-(defun gdb--table-add-row (table row &optional properties)
-  "Add ROW, a list of strings, to TABLE and recalculate column sizes.
-When non-nil, PROPERTIES will be added to the whole row when printing."
-  (let ((right-align (gdb--table-right-align table)))
-    (unless (gdb--table-column-sizes table)
-      (setf (gdb--table-column-sizes table) (make-list (length row) 0)))
+  (setf (gdb--table-column-sizes table)
+        (cl-loop for string in columns
+                 and size in (gdb--table-column-sizes table)
+                 and first = t then nil
+                 collect (- (max (abs size) (+ (string-width (or string ""))
+                                               (* (or (and first level) 0) 4)
+                                               (or (and first has-children 4) 0)))))))
 
-    (setf (gdb--table-rows           table) (append (gdb--table-rows           table) (list row)))
-    (setf (gdb--table-row-properties table) (append (gdb--table-row-properties table) (list properties)))
+(defun gdb--table-add-header (table columns)
+  "Set TABLE header to COLUMNS, a list of strings, and recalculate column sizes."
+  (gdb--table-update-column-sizes table columns)
+  (setf (gdb--table-header table) columns))
 
-    (setf (gdb--table-column-sizes table)
-          (cl-loop for size in (gdb--table-column-sizes table) and string in row
-                   collect (let ((new-size (max (abs size) (string-width (or string "")))))
-                             (if right-align new-size (- new-size)))))
+(defun gdb--table-add-row (table-or-parent columns &optional properties has-children)
+  "Add a row of COLUMNS, a list of strings, to TABLE-OR-PARENT and recalculate column sizes.
+When non-nil, PROPERTIES will be added to the whole row when printing.
+TABLE-OR-PARENT should be a table or a table row, which, in the latter case, will be made the parent of
+the inserted row.
+HAS-CHILDREN should be t when this node has children."
+  (let* ((table (cond ((eq (type-of table-or-parent) 'gdb--table)     table-or-parent)
+                      ((eq (type-of table-or-parent) 'gdb--table-row) (gdb--table-row-table table-or-parent))
+                      (t   (error "Unexpected table-or-argument type."))))
 
-    (unless right-align (setcar (last (gdb--table-column-sizes table)) 0))))
+         (parent (and (eq  (type-of table-or-parent) 'gdb--table-row) table-or-parent))
+         (level (or (and parent (1+ (gdb--table-row-level parent))) 0))
 
-(defun gdb--table-row-string (row column-sizes properties sep)
-  "Return ROW as a string, with PROPERTIES and respective COLUMN-SIZES, separated by SEP."
-  (apply #'propertize (cl-loop for string in row
+         (row (make-gdb--table-row :table table :columns columns :properties properties :level level
+                                   :has-children has-children)))
+
+    (gdb--table-update-column-sizes table columns level has-children)
+    (setf (gdb--table-rows table) (append (gdb--table-rows table) (list row)))
+
+    (when parent (setf (gdb--table-row-has-children parent) 'open))
+
+    row))
+
+(defun gdb--table-row-string (columns column-sizes sep &optional properties level has-children)
+  (apply #'propertize (cl-loop for string in columns
                                and size   in column-sizes
                                and first = t then nil
                                unless first concat sep
-                               concat (gdb--pad-string string size))
+                               concat (gdb--pad-string
+                                       (concat (and first (make-string (* (or level 0) 4) ? ))
+                                               (and first
+                                                    (cond ((eq has-children t)     "[+] ")
+                                                          ((eq has-children 'open) "[-] ")))
+                                               string)
+                                       size))
          properties))
 
-(defun gdb--table-insert (table &optional with-header sep)
+(defun gdb--table-insert (table &optional sep)
   "Erase buffer and insert TABLE with columns separated with SEP (space as default).
-If WITH-HEADER is set, then the first row is used as header. The table contents _are modified_."
+If WITH-HEADER is set, then the first row is used as header."
   (let ((column-sizes (gdb--table-column-sizes table))
         (sep (or sep " ")))
     (erase-buffer)
 
-    (when with-header
+    (when (gdb--table-header table)
       (setq-local header-line-format
-                  (list " " (gdb--table-row-string (pop (gdb--table-rows table)) column-sizes
-                                                   (pop (gdb--table-row-properties table)) sep))))
+                  (list " " (gdb--table-row-string (gdb--table-header table) column-sizes sep))))
 
     (cl-loop for row        in (gdb--table-rows table)
-             and properties in (gdb--table-row-properties table)
              and first = t then nil
              unless first do (insert "\n")
-             do (insert (gdb--table-row-string row column-sizes properties sep)))))
+             do (insert (gdb--table-row-string (gdb--table-row-columns    row) column-sizes sep
+                                               (gdb--table-row-properties row) (gdb--table-row-level row)
+                                               (gdb--table-row-has-children row))))))
 
 
 ;; ------------------------------------------------------------------------------------------
@@ -666,7 +697,7 @@ stopped thread before running the command."
          (cursor-on-line   (gdb--current-line))
          (table (make-gdb--table))
          (count 1) selected-thread-line)
-     (gdb--table-add-row table '("ID" "TgtID" "Name" "State" "Core" "Frame"))
+     (gdb--table-add-header table '("ID" "TgtID" "Name" "State" "Core" "Frame"))
      (dolist (thread threads)
        (let ((id-str (number-to-string (gdb--thread-id thread)))
              (target-id (gdb--thread-target-id thread))
@@ -684,7 +715,7 @@ stopped thread before running the command."
          (setq count (1+ count))))
 
      (remove-overlays nil nil 'gdb--thread-indicator t)
-     (gdb--table-insert table t)
+     (gdb--table-insert table)
      (gdb--scroll-buffer-to-line (current-buffer) cursor-on-line)
 
      (when selected-thread-line
@@ -710,7 +741,7 @@ stopped thread before running the command."
           (cursor-on-line  (gdb--current-line))
           (table (make-gdb--table))
           (count 1) selected-frame-line)
-     (gdb--table-add-row table '("Level" "Address" "Where"))
+     (gdb--table-add-header table '("Level" "Address" "Where"))
      (dolist (frame frames)
        (let ((level-str (number-to-string (gdb--frame-level frame)))
              (addr (gdb--frame-addr frame))
@@ -721,7 +752,7 @@ stopped thread before running the command."
          (setq count (1+ count))))
 
      (remove-overlays nil nil 'gdb--frame-indicator t)
-     (gdb--table-insert table t)
+     (gdb--table-insert table)
      (gdb--scroll-buffer-to-line (current-buffer) cursor-on-line)
 
      (when selected-frame-line
@@ -742,7 +773,7 @@ stopped thread before running the command."
   (gdb--with-valid-session
    (let ((breakpoints (gdb--session-breakpoints session))
          (table (make-gdb--table)))
-     (gdb--table-add-row table '("Num" "Type" "Disp" "Enb" "Addr" "Hits" "What"))
+     (gdb--table-add-header table '("Num" "Type" "Disp" "Enb" "Addr" "Hits" "What"))
      (dolist (breakpoint breakpoints)
        (let ((enabled-disp (if (gdb--breakpoint-enabled breakpoint)
                                (eval-when-compile (propertize "y" 'font-lock-face font-lock-warning-face))
@@ -754,7 +785,7 @@ stopped thread before running the command."
                                          (gdb--breakpoint-hits   breakpoint) (gdb--breakpoint-what   breakpoint))
                              `(gdb--breakpoint ,breakpoint))))
 
-     (gdb--table-insert table t))))
+     (gdb--table-insert table))))
 
 
 ;; ------------------------------------------------------------------------------------------
@@ -772,13 +803,13 @@ stopped thread before running the command."
    (let* ((frame (gdb--session-selected-frame session))
           (variables (and frame (gdb--frame-variables frame)))
           (table (make-gdb--table)))
-     (gdb--table-add-row table '("Name" "Type" "Value"))
+     (gdb--table-add-header table '("Name" "Type" "Value"))
      (dolist (variable variables)
        (gdb--table-add-row
         table (list (propertize (gdb--variable-name  variable) 'face 'font-lock-variable-name-face)
                     (propertize (gdb--variable-type  variable) 'face 'font-lock-type-face)
                     (or         (gdb--variable-value variable) "<Composite type>"))))
-     (gdb--table-insert table t))))
+     (gdb--table-insert table))))
 
 
 ;; ------------------------------------------------------------------------------------------
