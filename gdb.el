@@ -46,12 +46,13 @@ This can also be set to t, which means that all debug components are active.")
   '(gdb--context-ignore
     gdb--context-initial-file
     gdb--context-thread-info
-    gdb--context-frame-info      ;; Data: Thread
+    gdb--context-frame-info ;; Data: Thread
     gdb--context-breakpoint-insert
-    gdb--context-get-variables   ;; Data: Frame
-    gdb--context-variable-create
-    gdb--context-variable-update
-    gdb--context-disassemble     ;; Data: Disassemble buffer
+    gdb--context-get-variables ;; Data: Frame
+    gdb--context-var-create ;; Data: Expression
+    gdb--context-var-update
+    gdb--context-var-list-children
+    gdb--context-disassemble ;; Data: Disassemble buffer
     )
   "List of implemented token contexts.
 Must be in the same order of the `token_context' enum in the
@@ -86,7 +87,7 @@ Both are strings. FLAGS are the flags to be passed to -break-insert in order to 
 breakpoint of TYPE.")
 
 (cl-defstruct gdb--variable name type value)
-(cl-defstruct gdb--watched-var name type value thread parent children-count children flag)
+(cl-defstruct gdb--watched-var name expr type value thread parent children-count children open flag)
 
 (cl-defstruct gdb--session
   frame process buffers source-window
@@ -96,7 +97,7 @@ breakpoint of TYPE.")
 (defvar gdb--sessions nil
   "List of active sessions.")
 
-(cl-defstruct gdb--buffer-info session type thread update-func data)
+(cl-defstruct gdb--buffer-info session type thread update-func)
 (defvar-local gdb--buffer-info nil
   "GDB related information related to each buffer.")
 
@@ -212,14 +213,15 @@ THREAD may be nil, which means to remove the selected THREAD."
      (setf (gdb--session-selected-thread session) thread)
      (gdb--switch-to-frame (and thread (car (gdb--thread-frames thread))))
 
-     (with-current-buffer (gdb--get-buffer-with-type session 'gdb--threads)
-       (remove-overlays nil nil 'gdb--thread-indicator t)
-       (when thread
-         (let ((pos (text-property-any (point-min) (point-max) 'gdb--thread thread)))
-           (when pos
-             (gdb--place-symbol session (current-buffer) (line-number-at-pos pos) '((type . thread-indicator)))))
-
-         (message "Switched to thread %s." (gdb--thread-id thread))))
+     (let ((buffer (gdb--get-buffer-with-type session 'gdb--threads)) pos)
+       (when buffer
+         (with-current-buffer buffer
+           (remove-overlays nil nil 'gdb--thread-indicator t)
+           (when thread
+             (when (setq pos (text-property-any (point-min) (point-max) 'gdb--thread thread))
+               (gdb--place-symbol session (current-buffer) (line-number-at-pos pos)
+                                  '((type . thread-indicator))))
+             (message "Switched to thread %s." (gdb--thread-id thread))))))
 
      (cl-pushnew 'gdb--frames (gdb--session-buffer-types-to-update session)))))
 
@@ -236,17 +238,14 @@ When FRAME is in a different thread, switch to it."
          (gdb--command "-stack-list-variables --simple-values" (cons 'gdb--context-get-variables frame) frame)
        (cl-pushnew 'gdb--variables (gdb--session-buffer-types-to-update session)))
 
-     (let ((file (and frame (gdb--frame-file frame)))
-           (line (and frame (gdb--frame-line frame))))
-       (if (and file line)
-           (gdb--display-source-buffer file line)
-         (gdb--remove-all-symbols session 'gdb--source-indicator t))
+     (when frame (gdb--display-source-buffer (gdb--frame-file frame) (gdb--frame-line frame)))
 
-       (with-current-buffer (gdb--get-buffer-with-type session 'gdb--frames)
-         (remove-overlays nil nil 'gdb--frame-indicator t)
-         (when frame
-           (let ((pos (text-property-any (point-min) (point-max) 'gdb--frame frame)))
-             (when pos
+     (let ((buffer (gdb--get-buffer-with-type session 'gdb--frames)) pos)
+       (when buffer
+         (with-current-buffer buffer
+           (remove-overlays nil nil 'gdb--frame-indicator t)
+           (when frame
+             (when (setq pos (text-property-any (point-min) (point-max) 'gdb--frame frame))
                (gdb--place-symbol session (current-buffer) (line-number-at-pos pos)
                                   '((type . frame-indicator)))))))))))
 
@@ -379,18 +378,20 @@ HAS-CHILDREN should be t when this node has children."
 
     row))
 
-(defun gdb--table-row-string (columns column-sizes sep &optional properties level has-children)
+(defun gdb--table-row-string (columns column-sizes sep &optional with-newline properties level has-children)
   (apply #'propertize (cl-loop for string in columns
                                and size   in column-sizes
                                and first = t then nil
-                               unless first concat sep
+                               unless first concat sep into result
                                concat (gdb--pad-string
                                        (concat (and first (make-string (* (or level 0) 4) ? ))
                                                (and first
                                                     (cond ((eq has-children t)     "[+] ")
                                                           ((eq has-children 'open) "[-] ")))
                                                string)
-                                       size))
+                                       size)
+                               into result
+                               finally return (concat result (and with-newline "\n")))
          properties))
 
 (defun gdb--table-insert (table &optional sep)
@@ -404,10 +405,8 @@ If WITH-HEADER is set, then the first row is used as header."
       (setq-local header-line-format
                   (list " " (gdb--table-row-string (gdb--table-header table) column-sizes sep))))
 
-    (cl-loop for row        in (gdb--table-rows table)
-             and first = t then nil
-             unless first do (insert "\n")
-             do (insert (gdb--table-row-string (gdb--table-row-columns    row) column-sizes sep
+    (cl-loop for row in (gdb--table-rows table)
+             do (insert (gdb--table-row-string (gdb--table-row-columns    row) column-sizes sep t
                                                (gdb--table-row-properties row) (gdb--table-row-level row)
                                                (gdb--table-row-has-children row))))))
 
@@ -476,6 +475,9 @@ If WITH-HEADER is set, then the first row is used as header."
 
 (defun gdb--important-buffer-kill-cleanup () (gdb--kill-session (gdb--infer-session t)))
 
+(defsubst gdb--is-buffer-type (type)
+  (and gdb--buffer-info (eq (gdb--buffer-info-type gdb--buffer-info) type)))
+
 
 ;; ------------------------------------------------------------------------------------------
 ;; Frames and windows
@@ -516,7 +518,7 @@ If WITH-HEADER is set, then the first row is used as header."
       (gdb--set-window-buffer top-right    (gdb--frames-get-buffer session))
       (gdb--set-window-buffer middle-right (gdb--inferior-io-get-buffer session))
       (gdb--set-window-buffer bottom-left  (gdb--variables-get-buffer session))
-      (gdb--set-window-buffer bottom-right (gdb--threads-get-buffer session))
+      (gdb--set-window-buffer bottom-right (gdb--watcher-get-buffer session))
       (setf (gdb--session-source-window session) middle-left))))
 
 (defun gdb--scroll-buffer-to-line (buffer line)
@@ -621,7 +623,7 @@ stopped thread before running the command."
                            (and in-frame  (format " --frame  %d" (gdb--frame-level in-frame)))
                            " " (mapconcat #'identity (cdr command-parts) " ")))
      (gdb--debug-execute-body 'commands (message "Command %s" command))
-     (comint-simple-send (gdb--session-process session) command)
+     (comint-send-string (gdb--session-process session) (concat command "\n"))
 
      (when stopped-thread (gdb--command "-exec-continue" 'gdb--context-ignore stopped-thread)))))
 
@@ -706,8 +708,8 @@ stopped thread before running the command."
               (if (string= (gdb--thread-state thread) "running")
                   (eval-when-compile (propertize "running" 'font-lock-face font-lock-string-face))
                 (eval-when-compile (propertize "stopped" 'font-lock-face font-lock-warning-face))))
-             (frame-str (gdb--frame-location-string (car (gdb--thread-frames thread)) t))
-             (core (gdb--thread-core thread)))
+             (core (gdb--thread-core thread))
+             (frame-str (gdb--frame-location-string (car (gdb--thread-frames thread)) t)))
          (gdb--table-add-row table (list id-str target-id name state-display core frame-str)
                              `(gdb--thread ,thread))
          (when (eq selected-thread thread) (setq selected-thread-line count))
@@ -772,7 +774,10 @@ stopped thread before running the command."
 (defun gdb--breakpoints-update ()
   (gdb--with-valid-session
    (let ((breakpoints (gdb--session-breakpoints session))
-         (table (make-gdb--table)))
+         (cursor-on-line (gdb--current-line))
+         (cursor-on-breakpoint (get-text-property (point) 'gdb--breakpoint))
+         (table (make-gdb--table))
+         (count 1))
      (gdb--table-add-header table '("Num" "Type" "Disp" "Enb" "Addr" "Hits" "What"))
      (dolist (breakpoint breakpoints)
        (let ((enabled-disp (if (gdb--breakpoint-enabled breakpoint)
@@ -783,9 +788,12 @@ stopped thread before running the command."
                                          (gdb--breakpoint-type   breakpoint) (gdb--breakpoint-disp   breakpoint)
                                          enabled-disp                        (gdb--breakpoint-addr   breakpoint)
                                          (gdb--breakpoint-hits   breakpoint) (gdb--breakpoint-what   breakpoint))
-                             `(gdb--breakpoint ,breakpoint))))
+                             `(gdb--breakpoint ,breakpoint))
+         (when (eq cursor-on-breakpoint breakpoint) (setq cursor-on-line count))
+         (setq count (1+ count))))
 
-     (gdb--table-insert table))))
+     (gdb--table-insert table)
+     (gdb--scroll-buffer-to-line (current-buffer) cursor-on-line))))
 
 
 ;; ------------------------------------------------------------------------------------------
@@ -802,6 +810,7 @@ stopped thread before running the command."
   (gdb--with-valid-session
    (let* ((frame (gdb--session-selected-frame session))
           (variables (and frame (gdb--frame-variables frame)))
+          (cursor-on-line (gdb--current-line))
           (table (make-gdb--table)))
      (gdb--table-add-header table '("Name" "Type" "Value"))
      (dolist (variable variables)
@@ -809,7 +818,8 @@ stopped thread before running the command."
         table (list (propertize (gdb--variable-name  variable) 'face 'font-lock-variable-name-face)
                     (propertize (gdb--variable-type  variable) 'face 'font-lock-type-face)
                     (or         (gdb--variable-value variable) "<Composite type>"))))
-     (gdb--table-insert table))))
+     (gdb--table-insert table)
+     (gdb--scroll-buffer-to-line (current-buffer) cursor-on-line))))
 
 
 ;; ------------------------------------------------------------------------------------------
@@ -822,9 +832,37 @@ stopped thread before running the command."
   (gdb--rename-buffer "Watcher")
   (gdb--watcher-mode))
 
+(defun gdb--watcher-draw-var (table-or-parent var)
+  (let ((row (gdb--table-add-row
+              table-or-parent (list (propertize (gdb--watched-var-expr var) 'face 'font-lock-variable-name-face)
+                                    (propertize (gdb--watched-var-type var) 'face 'font-lock-type-face)
+                                    (gdb--watched-var-value var))
+              (list 'gdb--var var) (> (gdb--watched-var-children-count var) 0)))
+        (children (gdb--watched-var-children var)))
+    (when (gdb--watched-var-open var)
+      (cl-loop for child in children
+               do (gdb--watcher-draw-var row child)))))
+
 (defun gdb--watcher-update ()
   (gdb--with-valid-session
-   (erase-buffer)))
+   (let ((table (make-gdb--table)))
+     (gdb--table-add-header table '("Variable" "Type" "Value"))
+     (let ((cursor-on-line (gdb--current-line))
+           (cursor-on-var  (get-text-property (point) 'gdb--var))
+           (count 1))
+       (cl-loop for var being the hash-values of (gdb--session-watched-vars session)
+                do (unless (gdb--watched-var-parent var)
+                     (gdb--watcher-draw-var table var)
+                     (when (eq cursor-on-var var) (setq cursor-on-line count))
+                     (setq count (1+ count))))
+
+       (gdb--table-insert table)
+       (gdb--scroll-buffer-to-line (current-buffer) cursor-on-line)))))
+
+(defun gdb--remove-children-from-hash-table (session var)
+  (cl-loop for child in (gdb--watched-var-children var)
+           do (gdb--remove-children-from-hash-table child)
+           do (remhash (gdb--watched-var-name var) (gdb--session-watched-vars session))))
 
 
 ;; ------------------------------------------------------------------------------------------
@@ -845,21 +883,25 @@ Create the buffer, if it wasn't already open."
 (defun gdb--display-source-buffer (file line &optional no-mark)
   "Display buffer of the selected source."
   (gdb--with-valid-session
-   (let ((buffer (gdb--find-file file))
+   (let ((buffer (and file (gdb--find-file file)))
          (window (gdb--session-source-window session)))
      (gdb--remove-all-symbols session 'gdb--source-indicator t)
-     (unless no-mark (gdb--place-symbol session buffer line '((type . source-indicator)
-                                                              (source . t))))
+
+     (unless no-mark
+       (gdb--place-symbol session buffer line '((type . source-indicator) (source . t))))
 
      (when (and (window-live-p window) buffer)
        (with-selected-window window
          (switch-to-buffer buffer)
+
          (if (display-images-p)
              (set-window-fringes nil 8)
            (set-window-margins nil 2))
-         (goto-char (point-min))
-         (forward-line (1- line))
-         (recenter))))))
+
+         (when line
+           (goto-char (point-min))
+           (forward-line (1- line))
+           (recenter)))))))
 
 
 ;; ------------------------------------------------------------------------------------------
@@ -984,7 +1026,7 @@ it from the list."
      (cond
       ((string= "stopped" state)
        (gdb--command "-stack-list-frames" (cons 'gdb--context-frame-info thread) thread)
-       (gdb--command "-var-update --all-values *" 'gdb--context-variable-update thread))
+       (gdb--command "-var-update --all-values *" 'gdb--context-var-update thread))
 
       (t
        ;; NOTE(nox): Only update when it is running, otherwise it will update when the frame list
@@ -994,12 +1036,11 @@ it from the list."
 
 (defun gdb--add-frames-to-thread (thread &rest args)
   (gdb--with-valid-session
-   (cl-loop for (level-str addr func file line-str from) in args
-            do (push (make-gdb--frame
-                      :thread thread :level (string-to-number level-str) :addr addr :func func  :from from
-                      :file (gdb--complete-path file) :line (and line-str (string-to-number line-str)))
-                     (gdb--thread-frames thread))
-            finally do (setf (gdb--thread-frames thread) (nreverse (gdb--thread-frames thread))))
+   (setf (gdb--thread-frames thread)
+         (cl-loop for (level-str addr func file line-str from) in args
+                  collect (make-gdb--frame
+                           :thread thread :level (string-to-number level-str) :addr addr :func func  :from from
+                           :file (gdb--complete-path file) :line (and line-str (string-to-number line-str)))))
 
    (cl-pushnew 'gdb--threads (gdb--session-buffer-types-to-update session))
    (when (eq thread (gdb--session-selected-thread session))
@@ -1055,25 +1096,28 @@ it from the list."
             do (push (make-gdb--variable :name name :type type :value value) (gdb--frame-variables frame)))
    (cl-pushnew 'gdb--variables (gdb--session-buffer-types-to-update session))))
 
-(defun gdb--new-variable-info (name num-child value type thread-id)
+(defun gdb--new-variable-info (expr name num-child value type thread-id)
   (gdb--with-valid-session
-   (let ((expr (make-gdb--watched-var
-                :name name :children-count (and num-child (string-to-number num-child)) :value value
-                :type type :thread (and thread-id (gdb--get-thread-by-id (string-to-number thread-id))))))
-     (puthash name expr (gdb--session-watched-vars session)))))
+   (let ((var (make-gdb--watched-var
+               :name name :expr expr :type type :value value
+               :thread (and thread-id (gdb--get-thread-by-id (string-to-number thread-id)))
+               :children-count (or (and num-child (string-to-number num-child)) 0))))
+     (puthash name var (gdb--session-watched-vars session))
+     (cl-pushnew 'gdb--watcher (gdb--session-buffer-types-to-update session)))))
 
 (defun gdb--variable-update-info (&rest args)
   (gdb--with-valid-session
    (cl-loop for (name value in-scope type-changed new-type new-children-count) in args
+            and should-update = nil then t
             do
             (let ((var (gethash name (gdb--session-watched-vars session))))
               (cond ((string= in-scope "true")
                      (when (string= type-changed "true")
-                       ;; TODO(nox): Delete all children
+                       (gdb--remove-children-from-hash-table session var)
                        (setf (gdb--watched-var-type var) new-type
-                             (gdb--watched-var-children-count session)
-                             (and new-children-count (string-to-number new-children-count))))
-
+                             (gdb--watched-var-children var) nil ;; NOTE(nox): Automatically deleted
+                             (gdb--watched-var-children-count var) (and new-children-count
+                                                                        (string-to-number new-children-count))))
                      (setf (gdb--watched-var-value var) value
                            (gdb--watched-var-flag  var) 'modified))
 
@@ -1081,9 +1125,27 @@ it from the list."
                      (setf (gdb--watched-var-value var) nil
                            (gdb--watched-var-flag  var) 'out-of-scope))
 
-                    (t
-                     ;; TODO(nox): Delete this variable
-                     ))))))
+                    (t ;; NOTE(nox): Invalid
+                     (gdb--command (concat "-var-delete " name) 'gdb--context-ignore)
+                     (gdb--remove-children-from-hash-table session var)
+                     (remhash name (gdb--session-watched-vars session)))))
+            finally
+            (when should-update
+              (cl-pushnew 'gdb--watcher (gdb--session-buffer-types-to-update session))))))
+
+(defun gdb--variable-add-children (parent &rest children)
+  (gdb--with-valid-session
+   (setf (gdb--watched-var-children-count parent) (length children))
+   (cl-loop for (name expr num-children value type thread-id) in children
+            do
+            (let ((var (make-gdb--watched-var
+                        :name name :expr expr :type type :value value :parent parent
+                        :thread (and thread-id (gdb--get-thread-by-id (string-to-number thread-id)))
+                        :children-count (or (and num-children (string-to-number num-children)) 0))))
+              (puthash name var (gdb--session-watched-vars session))
+              (push var (gdb--watched-var-children parent)))
+            finally (setf (gdb--watched-var-children parent) (nreverse (gdb--watched-var-children parent))))
+   (cl-pushnew 'gdb--watcher (gdb--session-buffer-types-to-update session))))
 
 ;; (defun gdb--set-disassembly (buffer list with-source-info)
 ;;   (when (buffer-live-p buffer)
@@ -1098,13 +1160,31 @@ it from the list."
 (defun gdb-watch-expression ()
   (interactive)
   (gdb--with-valid-session
+   (unless (gdb--session-selected-thread session) (user-error "No selected thread"))
+   (unless (string= (gdb--thread-state (gdb--session-selected-thread session)) "stopped")
+     (user-error "The selected thread is running"))
+
    (let ((expression (replace-regexp-in-string "\\(\\`[ \t\r\n]+\\|[ \t\r\n]+\\'\\)" ""
                                                (read-string "Expression: "))))
      (when (> (length expression) 0)
        (setq expression (replace-regexp-in-string "\n+" " " expression)
-             expression (format "\"%s\"" (replace-regexp-in-string "[ \t\n]+" " " expression)))
-       (gdb--command (concat "-var-create - * " expression) 'gdb--context-variable-create
+             expression (replace-regexp-in-string "[ \t\n]+" " " expression))
+       (gdb--command (format "-var-create - * \"%s\"" expression) (cons 'gdb--context-var-create expression)
                      (gdb--session-selected-thread session))))))
+
+(defun gdb-watcher-toggle ()
+  (interactive)
+  (gdb--with-valid-session
+   (when (gdb--is-buffer-type 'gdb--watcher)
+     (let ((var (get-text-property (point) 'gdb--var)))
+       (when (and var
+                  (>    (gdb--watched-var-children-count var) 0)
+                  (setf (gdb--watched-var-open var) (not (gdb--watched-var-open var)))
+                  (not  (gdb--watched-var-children var)))
+         (gdb--command (concat "-var-list-children --simple-values " (gdb--watched-var-name var))
+                       (cons 'gdb--context-var-list-children var)))
+       (cl-pushnew 'gdb--watcher (gdb--session-buffer-types-to-update session))
+       (gdb--update)))))
 
 (defun gdb-kill-session ()
   "Kill current GDB session."
@@ -1124,8 +1204,9 @@ it from the list."
       (gdb--inferior-io-get-buffer session)
 
       ;; NOTE(nox): Essential settings
-      (gdb--command "-gdb-set mi-async on" 'gdb--context-ignore)
-      (gdb--command "-gdb-set non-stop on" 'gdb--context-ignore))
+      (gdb--command "-gdb-set mi-async   on"  'gdb--context-ignore)
+      (gdb--command "-gdb-set pagination off" 'gdb--context-ignore)
+      (gdb--command "-gdb-set non-stop   on"  'gdb--context-ignore))
 
     (gdb--setup-windows session)
     session))
