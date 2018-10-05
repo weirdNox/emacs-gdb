@@ -186,6 +186,7 @@ This is shared among all sessions.")
 
     (set-process-sentinel (gdb--session-process session) nil)
     (delete-process (gdb--session-process session))
+
     (dolist (buffer (gdb--session-buffers session))
       (when (buffer-live-p buffer)
         (with-current-buffer buffer
@@ -194,7 +195,7 @@ This is shared among all sessions.")
                 (when (eq type 'gdb--inferior-io)
                   (let ((proc (get-buffer-process buffer)))
                     (when proc
-                      (set-process-sentinel  nil)
+                      (set-process-sentinel proc nil)
                       (delete-process (get-buffer-process buffer)))))
 
                 (if (memq type gdb--keep-buffer-types)
@@ -211,12 +212,12 @@ This is shared among all sessions.")
               when (= (gdb--thread-id thread) id) return thread))))
 
 (defun gdb--switch-to-thread (thread)
-  "Unconditionally switch to _different_ THREAD. This will also switch to the top level frame.
+  "Unconditionally switch to _different_ THREAD. This will also switch to the most relevant frame.
 THREAD may be nil, which means to remove the selected THREAD."
   (gdb--with-valid-session
    (unless (eq thread (gdb--session-selected-thread session))
      (setf (gdb--session-selected-thread session) thread)
-     (gdb--switch-to-frame (and thread (car (gdb--thread-frames thread))))
+     (gdb--switch-to-frame (gdb--best-frame-to-switch-to thread))
 
      (let ((buffer (gdb--get-buffer-with-type session 'gdb--threads)) pos)
        (when buffer
@@ -229,6 +230,16 @@ THREAD may be nil, which means to remove the selected THREAD."
              (message "Switched to thread %s." (gdb--thread-id thread))))))
 
      (cl-pushnew 'gdb--frames (gdb--session-buffer-types-to-update session)))))
+
+(defun gdb--best-frame-to-switch-to (thread)
+  "Return the most relevant frame to switch to in THREAD's frames."
+  (when thread
+    (let ((fallback (car (gdb--thread-frames thread)))
+          runner-up)
+      (or (cl-loop for frame in (gdb--thread-frames thread)
+                   when (and (gdb--frame-file frame) (gdb--frame-line frame)) return frame
+                   when (gdb--frame-file frame) do (setq runner-up frame))
+          runner-up fallback))))
 
 (defun gdb--switch-to-frame (frame)
   "Unconditionally switch to a _different_ FRAME.
@@ -243,7 +254,9 @@ When FRAME is in a different thread, switch to it."
          (gdb--command "-stack-list-variables --simple-values" (cons 'gdb--context-get-variables frame) frame)
        (cl-pushnew 'gdb--variables (gdb--session-buffer-types-to-update session)))
 
-     (when frame (gdb--display-source-buffer (gdb--frame-file frame) (gdb--frame-line frame)))
+     (if frame
+         (gdb--display-source-buffer (gdb--frame-file frame) (gdb--frame-line frame))
+       (gdb--remove-all-symbols session 'gdb--source-indicator t))
 
      (let ((buffer (gdb--get-buffer-with-type session 'gdb--frames)) pos)
        (when buffer
@@ -253,6 +266,17 @@ When FRAME is in a different thread, switch to it."
              (when (setq pos (text-property-any (point-min) (point-max) 'gdb--frame frame))
                (gdb--place-symbol session (current-buffer) (line-number-at-pos pos)
                                   '((type . frame-indicator)))))))))))
+
+(defun gdb--switch (frame-or-thread)
+  "Unconditionally switch to a _different_ FRAME-OR-THREAD."
+  (gdb--with-valid-session
+   (cl-assert (or (gdb--thread-p frame-or-thread) (gdb--frame-p frame-or-thread)))
+   (let* ((type (type-of frame-or-thread))
+          (thread (if (eq type 'gdb--thread) frame-or-thread (gdb--frame-thread frame-or-thread)))
+          (frame  (if (eq type 'gdb--frame)  frame-or-thread (gdb--best-frame-to-switch-to frame-or-thread))))
+     (if frame
+         (gdb--switch-to-frame frame)
+       (gdb--switch-to-thread thread)))))
 
 (defun gdb--conditional-switch (frame-or-thread &optional cause)
   "Conditionally switch to a _different_ FRAME-OR-THREAD depending on CAUSE.
@@ -264,17 +288,19 @@ CAUSE should be a list of the following symbols:
 
 When the thread is switched, the current frame will also be changed."
   (gdb--with-valid-session
-   (cl-assert (or (gdb--thread-p frame-or-thread) (gdb--frame-p frame-or-thread) (not frame-or-thread)))
+   (cl-assert (or (gdb--thread-p frame-or-thread) (gdb--frame-p frame-or-thread)))
    (let* ((type (type-of frame-or-thread))
           (thread (if (eq type 'gdb--thread) frame-or-thread (gdb--frame-thread frame-or-thread)))
-          (frame  (if (eq type 'gdb--frame)  frame-or-thread (car (gdb--thread-frames frame-or-thread))))
+          (frame  (if (eq type 'gdb--frame)  frame-or-thread (gdb--best-frame-to-switch-to frame-or-thread)))
           (selected-thread (gdb--session-selected-thread session))
           (condition (or (not selected-thread)
                          (and (memq 'running cause)
                               (string= "running" (gdb--thread-state selected-thread)))
                          (and (eq type 'gdb--frame) (memq 'same-thread cause)
                               (eq thread selected-thread)))))
-     (when condition (gdb--switch-to-frame frame)))))
+     (when condition (if frame
+                         (gdb--switch-to-frame frame)
+                       (gdb--switch-to-thread thread))))))
 
 
 ;; ------------------------------------------------------------------------------------------
@@ -524,7 +550,7 @@ If WITH-HEADER is set, then the first row is used as header."
       (balance-windows)
       (gdb--set-window-buffer top-left     (gdb--comint-get-buffer session))
       (gdb--set-window-buffer top-right    (gdb--frames-get-buffer session))
-      (gdb--set-window-buffer middle-right (gdb--inferior-io-get-buffer session))
+      (gdb--set-window-buffer middle-right (gdb--threads-get-buffer session))
       (gdb--set-window-buffer bottom-left  (gdb--variables-get-buffer session))
       (gdb--set-window-buffer bottom-right (gdb--watcher-get-buffer session))
       (setf (gdb--session-source-window session) middle-left))))
@@ -638,26 +664,21 @@ stopped thread before running the command. If FORCE-STOPPED is
      (when (and stopped-thread (not (eq force-stopped 'no-resume)))
        (gdb--command "-exec-continue" 'gdb--context-ignore stopped-thread)))))
 
-(defun gdb--infer-thread-or-frame ()
-  ;; (when (not thread)
-  ;;   (cond ((eq gdb--buffer-type 'gdb--threads)
-  ;;          (setq thread (get-text-property (point) 'gdb--thread-id))
-  ;;          (when thread (setq thread (int-to-string thread))))
-  ;;         ((eq gdb--buffer-type 'gdb--frames)
-  ;;          (setq thread (or gdb--thread-id (gdb--local gdb--thread-id)))
-  ;;          (setq frame (get-text-property (point) 'gdb--frame-level))
-  ;;          (when thread
-  ;;            (setq thread (int-to-string thread))
-  ;;            (when frame (setq frame (int-to-string frame)))))
-  ;;         ((eq gdb--buffer-type 'gdb--disassembly) ;; TODO(nox): Do this when disassembly is done
-  ;;          )
-  ;;         (t (setq thread (gdb--local (and gdb--thread-id
-  ;;                                          (int-to-string gdb--thread-id)))))))
-  ;; (gdb--command (concat command
-  ;;                       (and thread (concat " --thread " thread))
-  ;;                       (and thread frame (concat " --frame " frame)))
-  ;;               context)
-  )
+(defun gdb--infer-thread-or-frame (&optional not-selected)
+  (gdb--with-valid-session
+   (let* ((buffer-info gdb--buffer-info)
+          (buffer-type (and buffer-info (gdb--buffer-info-type buffer-info)))
+          result)
+     (when buffer-type
+       (cond ((eq buffer-type 'gdb--threads) (setq result (get-text-property (point) 'gdb--thread)))
+             ((eq buffer-type 'gdb--frames)  (setq result (get-text-property (point) 'gdb--frame)))))
+     (or result (and (not not-selected) (gdb--session-selected-thread session))))))
+
+(defun gdb--infer-thread (&optional not-selected)
+  (let ((thread-or-frame (gdb--infer-thread-or-frame not-selected)))
+    (if (eq (type-of thread-or-frame) 'gdb--frame)
+        (gdb--frame-thread thread-or-frame)
+      thread-or-frame)))
 
 
 ;; ------------------------------------------------------------------------------------------
@@ -668,21 +689,23 @@ stopped thread before running the command. If FORCE-STOPPED is
 
 (gdb--simple-get-buffer gdb--inferior-io ignore "Inferior I/O"
   (gdb-inferior-io-mode)
-  (gdb--inferior-io-initialization buffer))
+  (gdb--inferior-io-initialization))
 
-(defun gdb--inferior-io-initialization (buffer)
-  (let ((old-process (get-buffer-process buffer)) inferior-process tty)
-    (when old-process (set-process-buffer old-process nil))
+(defun gdb--inferior-io-initialization ()
+  (gdb--with-valid-session
+   (let* ((buffer (current-buffer))
+          (old-process (get-buffer-process buffer)) inferior-process tty)
+     (when old-process (set-process-buffer old-process nil))
 
-    (setq inferior-process (get-buffer-process (make-comint-in-buffer "GDB inferior" buffer nil))
-          tty (or (process-get inferior-process 'remote-tty)
-                  (process-tty-name inferior-process)))
-    (set-process-sentinel inferior-process #'gdb--inferior-io-sentinel)
-    (gdb--command (concat "-inferior-tty-set " tty) 'gdb--context-ignore)
+     (setq inferior-process (get-buffer-process (make-comint-in-buffer "GDB inferior" buffer nil))
+           tty (or (process-get inferior-process 'remote-tty)
+                   (process-tty-name inferior-process)))
+     (set-process-sentinel inferior-process #'gdb--inferior-io-sentinel)
+     (gdb--command (concat "-inferior-tty-set " tty) 'gdb--context-ignore)
 
-    (when old-process (sit-for 1) (delete-process old-process))
+     (when old-process (sit-for 1) (delete-process old-process))
 
-    (add-hook 'kill-buffer-hook #'gdb--important-buffer-kill-cleanup nil t)))
+     (add-hook 'kill-buffer-hook #'gdb--important-buffer-kill-cleanup nil t))))
 
 ;; NOTE(nox): When the debuggee exits, Emacs gets an EIO error and stops listening to the
 ;; tty. This re-inits the buffer so everything works fine!
@@ -692,7 +715,7 @@ stopped thread before running the command. If FORCE-STOPPED is
     (cond ((eq process-status 'failed)
            (set-process-sentinel process nil)
            (if buffer
-               (with-current-buffer buffer (gdb--inferior-io-initialization buffer))
+               (with-current-buffer buffer (gdb--inferior-io-initialization))
              (delete-process process)))
           ((and (string= str "killed\n") buffer)
            (with-current-buffer buffer (gdb--kill-session (gdb--infer-session t)))))))
@@ -1073,7 +1096,7 @@ it from the list."
        ;; NOTE(nox): Only update when it is running, otherwise it will update when the frame list
        ;; arrives.
        (cl-pushnew 'gdb--threads (gdb--session-buffer-types-to-update session))
-       (gdb--conditional-switch thread '(no-selected-thread)))))))
+       (gdb--conditional-switch thread '(not-selected-thread)))))))
 
 (defun gdb--add-frames-to-thread (thread &rest args)
   (gdb--with-valid-session
@@ -1087,7 +1110,7 @@ it from the list."
    (when (eq thread (gdb--session-selected-thread session))
      (cl-pushnew 'gdb--frames (gdb--session-buffer-types-to-update session)))
 
-   (gdb--conditional-switch (car (gdb--thread-frames thread)) '(running same-thread))))
+   (gdb--conditional-switch (gdb--best-frame-to-switch-to thread) '(running same-thread))))
 
 (defun gdb--breakpoint-changed (number-str type disp enabled-str addr func fullname line-str at
                                            pending thread cond times what)
@@ -1202,6 +1225,7 @@ it from the list."
   :keymap (let ((map (make-sparse-keymap)))
             (define-key map (kbd "<f5>")   #'gdb-run)
             (define-key map (kbd "<C-f5>") #'gdb-start)
+            (define-key map (kbd "<S-f5>") #'gdb-kill)
             map))
 
 
@@ -1246,6 +1270,60 @@ If ARG is non-nil, stop at the start of the inferior's main subprogram."
   "Start execution of the inferior from the beginning, stopping at the start of the inferior's main subprogram."
   (interactive)
   (gdb-run t))
+
+(defun gdb-continue (arg)
+  "If ARG is nil, try to resume threads in this order:
+  - Inferred thread if it is stopped
+  - Selected thread if it is stopped
+  - All threads
+
+If ARG is non-nil, resume all threads unconditionally."
+  (interactive "P")
+  (gdb--with-valid-session
+   (let* ((inferred-thread (gdb--infer-thread 'not-selected))
+          (selected-thread (gdb--session-selected-thread session))
+          (thread-to-resume
+           (unless arg
+             (cond
+              ((and inferred-thread (string= (gdb--thread-state inferred-thread) "stopped")) inferred-thread)
+              ((and selected-thread (string= (gdb--thread-state selected-thread) "stopped")) selected-thread)))))
+
+     (if (or arg (not thread-to-resume))
+         (gdb--command "-exec-continue --all")
+       (gdb--command "-exec-continue" nil thread-to-resume)))))
+
+(defun gdb-stop (arg)
+  "If ARG is nil, try to stop threads in this order:
+  - Inferred thread if it is running
+  - Selected thread if it is running
+  - All threads
+
+If ARG is non-nil, stop all threads unconditionally."
+  (interactive "P")
+  (gdb--with-valid-session
+   (let* ((inferred-thread (gdb--infer-thread 'not-selected))
+          (selected-thread (gdb--session-selected-thread session))
+          (thread-to-stop
+           (unless arg
+             (cond
+              ((and inferred-thread (not (string= (gdb--thread-state inferred-thread) "stopped"))) inferred-thread)
+              ((and selected-thread (not (string= (gdb--thread-state selected-thread) "stopped"))) selected-thread)))))
+
+     (if (or arg (not thread-to-stop))
+         (gdb--command "-exec-interrupt --all")
+       (gdb--command "-exec-interrupt" nil thread-to-stop)))))
+
+(defun gdb-kill ()
+  "Kill inferior process."
+  (interactive)
+  (gdb--with-valid-session (when (gdb--session-threads session) (gdb--command "kill" nil nil 'no-resume))))
+
+(defun gdb-select ()
+  "Select inferred frame or thread."
+  (interactive)
+  (gdb--with-valid-session
+   (let ((thread-or-frame (gdb--infer-thread-or-frame 'not-selected)))
+     (when thread-or-frame (gdb--switch thread-or-frame)))))
 
 (defun gdb-kill-session ()
   "Kill current GDB session."
