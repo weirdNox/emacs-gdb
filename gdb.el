@@ -189,14 +189,16 @@ This is shared among all sessions.")
     (dolist (buffer (gdb--session-buffers session))
       (when (buffer-live-p buffer)
         (with-current-buffer buffer
-          (let ((type (gdb--buffer-info-type gdb--buffer-info)))
-            (when (eq type 'gdb--inferior-io)
-              (set-process-sentinel (get-buffer-process buffer) nil)
-              (delete-process (get-buffer-process buffer)))
+          (if gdb--buffer-info
+              (let ((type (gdb--buffer-info-type gdb--buffer-info)))
+                (when (eq type 'gdb--inferior-io)
+                  (set-process-sentinel (get-buffer-process buffer) nil)
+                  (delete-process (get-buffer-process buffer)))
 
-            (if (memq type gdb--keep-buffer-types)
-                (setq gdb--buffer-info nil)
-              (kill-buffer))))))
+                (if (memq type gdb--keep-buffer-types)
+                    (setq gdb--buffer-info nil)
+                  (kill-buffer)))
+            (kill-buffer)))))
 
     (gdb--remove-all-symbols session 'all)))
 
@@ -416,7 +418,8 @@ If WITH-HEADER is set, then the first row is used as header."
 ;; Buffers
 (defun gdb--get-buffer-with-type (session type)
   (cl-loop for buffer in (gdb--session-buffers session)
-           when (eq (gdb--buffer-info-type (buffer-local-value 'gdb--buffer-info buffer)) type)
+           when (let ((buffer-info (buffer-local-value 'gdb--buffer-info buffer)))
+                  (and buffer-info (eq (gdb--buffer-info-type buffer-info) type)))
            return buffer
            finally return nil))
 
@@ -430,8 +433,8 @@ If WITH-HEADER is set, then the first row is used as header."
            (t (let ((buffer (generate-new-buffer "*GDB-temp*")))
                 (with-current-buffer buffer
                   ,@body
-                  (setq gdb--buffer-info
-                        (make-gdb--buffer-info :session session :type ',type :update-func #',update-func)))
+                  (setq gdb--buffer-info (make-gdb--buffer-info :session session :type ',type
+                                                                :update-func #',update-func)))
                 (push buffer (gdb--session-buffers session))
                 (gdb--update-buffer buffer)
                 buffer)))))
@@ -448,10 +451,11 @@ If WITH-HEADER is set, then the first row is used as header."
          (buffers-to-update (gdb--session-buffers-to-update session))
          (types-to-update   (gdb--session-buffer-types-to-update session)))
      (dolist (buffer (gdb--session-buffers session))
-       (when (or (memq buffer buffers-to-update)
-                 (memq (gdb--buffer-info-type (buffer-local-value 'gdb--buffer-info buffer))
-                       types-to-update))
-         (gdb--update-buffer buffer)))
+       (let ((buffer-info (buffer-local-value 'gdb--buffer-info buffer)))
+         (if buffer-info
+             (when (or (memq buffer buffers-to-update) (memq (gdb--buffer-info-type buffer-info) types-to-update))
+               (gdb--update-buffer buffer))
+           (kill-buffer buffer))))
 
      (setf (gdb--session-buffers-to-update session) nil
            (gdb--session-buffer-types-to-update session) nil))))
