@@ -423,7 +423,7 @@ If WITH-HEADER is set, then the first row is used as header."
            return buffer
            finally return nil))
 
-(defmacro gdb--simple-get-buffer (type update-func &rest body)
+(defmacro gdb--simple-get-buffer (type update-func name &rest body)
   "Simple buffer creator/fetcher, for buffers that should be unique in a session."
   (declare (indent defun) (debug (sexp sexp body)))
   (unless (memq type gdb--buffer-types) (error "Type %s does not exist" (symbol-name type)))
@@ -432,6 +432,7 @@ If WITH-HEADER is set, then the first row is used as header."
      (cond ((gdb--get-buffer-with-type session ',type))
            (t (let ((buffer (generate-new-buffer "*GDB-temp*")))
                 (with-current-buffer buffer
+                  (gdb--rename-buffer ,name)
                   ,@body
                   (setq gdb--buffer-info (make-gdb--buffer-info :session session :type ',type
                                                                 :update-func #',update-func)))
@@ -548,8 +549,7 @@ If WITH-HEADER is set, then the first row is used as header."
   (setq-local paragraph-separate "\\'")
   (setq-local paragraph-start comint-prompt-regexp))
 
-(gdb--simple-get-buffer gdb--comint ignore
-  (gdb--rename-buffer "Comint")
+(gdb--simple-get-buffer gdb--comint ignore "Comint"
   (let ((process-connection-type nil))
     (make-comint-in-buffer "GDB" buffer "gdb" nil "-i=mi" "-nx"))
   (gdb-comint-mode)
@@ -660,8 +660,7 @@ stopped thread before running the command."
   "Major mode for interacting with the inferior."
   :syntax-table nil :abbrev-table nil)
 
-(gdb--simple-get-buffer gdb--inferior-io ignore
-  (gdb--rename-buffer "Inferior I/O")
+(gdb--simple-get-buffer gdb--inferior-io ignore "Inferior I/O"
   (gdb-inferior-io-mode)
   (gdb--inferior-io-initialization buffer))
 
@@ -698,8 +697,7 @@ stopped thread before running the command."
   (setq-local buffer-read-only t)
   (buffer-disable-undo))
 
-(gdb--simple-get-buffer gdb--threads gdb--threads-update
-  (gdb--rename-buffer "Threads")
+(gdb--simple-get-buffer gdb--threads gdb--threads-update "Threads"
   (gdb-threads-mode))
 
 (defun gdb--threads-update ()
@@ -747,8 +745,7 @@ stopped thread before running the command."
   (setq-local buffer-read-only t)
   (buffer-disable-undo))
 
-(gdb--simple-get-buffer gdb--frames gdb--frames-update
-  (gdb--rename-buffer "Stack Frames")
+(gdb--simple-get-buffer gdb--frames gdb--frames-update "Stack Frames"
   (gdb-frames-mode))
 
 (defun gdb--frames-update ()
@@ -790,8 +787,7 @@ stopped thread before running the command."
   (setq-local buffer-read-only t)
   (buffer-disable-undo))
 
-(gdb--simple-get-buffer gdb--breakpoints gdb--breakpoints-update
-  (gdb--rename-buffer "Breakpoints")
+(gdb--simple-get-buffer gdb--breakpoints gdb--breakpoints-update "Breakpoints"
   (gdb-breakpoints-mode))
 
 (defun gdb--breakpoints-update ()
@@ -831,8 +827,7 @@ stopped thread before running the command."
   (setq-local buffer-read-only t)
   (buffer-disable-undo))
 
-(gdb--simple-get-buffer gdb--variables gdb--variables-update
-  (gdb--rename-buffer "Variables")
+(gdb--simple-get-buffer gdb--variables gdb--variables-update "Variables"
   (gdb-variables-mode))
 
 (defun gdb--variables-update ()
@@ -864,8 +859,7 @@ stopped thread before running the command."
   (setq-local buffer-read-only t)
   (buffer-disable-undo))
 
-(gdb--simple-get-buffer gdb--watcher gdb--watcher-update
-  (gdb--rename-buffer "Watcher")
+(gdb--simple-get-buffer gdb--watcher gdb--watcher-update "Watcher"
   (gdb-watcher-mode))
 
 (defun gdb--watcher-draw-var (table-or-parent var)
@@ -1188,6 +1182,17 @@ it from the list."
 
 
 ;; ------------------------------------------------------------------------------------------
+;; Global minor mode
+(define-minor-mode gdb-keys-mode
+  "This mode enables global keybindings to interact with GDB."
+  :global t
+  :keymap (let ((map (make-sparse-keymap)))
+            (define-key map (kbd "<f5>")   #'gdb-run)
+            (define-key map (kbd "<C-f5>") #'gdb-start)
+            map))
+
+
+;; ------------------------------------------------------------------------------------------
 ;; User commands
 (defun gdb-watch-expression ()
   (interactive)
@@ -1217,6 +1222,17 @@ it from the list."
                        (cons 'gdb--context-var-list-children var)))
        (cl-pushnew 'gdb--watcher (gdb--session-buffer-types-to-update session))
        (gdb--update)))))
+
+(defun gdb-run (arg)
+  "Start execution of the inferior from the beginning.
+If ARG is non-nil, stop at the start of the inferior's main subprogram."
+  (interactive "P")
+  (gdb--with-valid-session (gdb--command (concat "-exec-run" (and arg " --start")) nil nil t)))
+
+(defun gdb-start ()
+  "Start execution of the inferior from the beginning, stopping at the start of the inferior's main subprogram."
+  (interactive)
+  (gdb-run t))
 
 (defun gdb-kill-session ()
   "Kill current GDB session."
