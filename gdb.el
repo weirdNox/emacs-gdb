@@ -1,6 +1,6 @@
 ;;; gdb.el --- GDB frontend -*- lexical-binding: t; -*-
 
-;; Copyright (C) 2017  Gonçalo Santos
+;; Copyright (C) 2017-2018  Gonçalo Santos
 
 ;; Author: Gonçalo Santos (aka. weirdNox)
 ;; Keywords: lisp gdb
@@ -100,6 +100,7 @@ breakpoint of TYPE.")
 (cl-defstruct gdb--buffer-info session type thread update-func)
 (defvar-local gdb--buffer-info nil
   "GDB related information related to each buffer.")
+(put 'gdb--buffer-info 'permanent-local t)
 
 (defvar gdb--next-token 0
   "Next token value to be used for context matching.
@@ -683,13 +684,19 @@ stopped thread before running the command."
 
 ;; ------------------------------------------------------------------------------------------
 ;; Threads buffer
-(define-derived-mode gdb--threads-mode nil "GDB Threads"
+(defvar gdb-threads-mode-map
+  (let ((map (make-sparse-keymap)))
+    (define-key map (kbd "p")   #'previous-line)
+    (define-key map (kbd "n")   #'next-line)
+    map))
+
+(define-derived-mode gdb-threads-mode nil "GDB Threads"
   (setq-local buffer-read-only t)
   (buffer-disable-undo))
 
 (gdb--simple-get-buffer gdb--threads gdb--threads-update
   (gdb--rename-buffer "Threads")
-  (gdb--threads-mode))
+  (gdb-threads-mode))
 
 (defun gdb--threads-update ()
   (gdb--with-valid-session
@@ -726,13 +733,19 @@ stopped thread before running the command."
 
 ;; ------------------------------------------------------------------------------------------
 ;; Stack frames buffer
-(define-derived-mode gdb--frames-mode nil "GDB Frames"
+(defvar gdb-frames-mode-map
+  (let ((map (make-sparse-keymap)))
+    (define-key map (kbd "p")   #'previous-line)
+    (define-key map (kbd "n")   #'next-line)
+    map))
+
+(define-derived-mode gdb-frames-mode nil "GDB Frames"
   (setq-local buffer-read-only t)
   (buffer-disable-undo))
 
 (gdb--simple-get-buffer gdb--frames gdb--frames-update
   (gdb--rename-buffer "Stack Frames")
-  (gdb--frames-mode))
+  (gdb-frames-mode))
 
 (defun gdb--frames-update ()
   (gdb--with-valid-session
@@ -763,13 +776,19 @@ stopped thread before running the command."
 
 ;; ------------------------------------------------------------------------------------------
 ;; Breakpoints buffer
-(define-derived-mode gdb--breakpoints-mode nil "GDB Breakpoints"
+(defvar gdb-breakpoints-mode-map
+  (let ((map (make-sparse-keymap)))
+    (define-key map (kbd "p")   #'previous-line)
+    (define-key map (kbd "n")   #'next-line)
+    map))
+
+(define-derived-mode gdb-breakpoints-mode nil "GDB Breakpoints"
   (setq-local buffer-read-only t)
   (buffer-disable-undo))
 
 (gdb--simple-get-buffer gdb--breakpoints gdb--breakpoints-update
   (gdb--rename-buffer "Breakpoints")
-  (gdb--breakpoints-mode))
+  (gdb-breakpoints-mode))
 
 (defun gdb--breakpoints-update ()
   (gdb--with-valid-session
@@ -798,13 +817,19 @@ stopped thread before running the command."
 
 ;; ------------------------------------------------------------------------------------------
 ;; Variables buffer
-(define-derived-mode gdb--variables-mode nil "GDB Variables"
+(defvar gdb-variables-mode-map
+  (let ((map (make-sparse-keymap)))
+    (define-key map (kbd "p")   #'previous-line)
+    (define-key map (kbd "n")   #'next-line)
+    map))
+
+(define-derived-mode gdb-variables-mode nil "GDB Variables"
   (setq-local buffer-read-only t)
   (buffer-disable-undo))
 
 (gdb--simple-get-buffer gdb--variables gdb--variables-update
   (gdb--rename-buffer "Variables")
-  (gdb--variables-mode))
+  (gdb-variables-mode))
 
 (defun gdb--variables-update ()
   (gdb--with-valid-session
@@ -824,13 +849,20 @@ stopped thread before running the command."
 
 ;; ------------------------------------------------------------------------------------------
 ;; Watcher buffers
-(define-derived-mode gdb--watcher-mode nil "GDB Watcher"
+(defvar gdb-watcher-mode-map
+  (let ((map (make-sparse-keymap)))
+    (define-key map (kbd "p")   #'previous-line)
+    (define-key map (kbd "n")   #'next-line)
+    (define-key map (kbd "SPC") #'gdb-watcher-toggle)
+    map))
+
+(define-derived-mode gdb-watcher-mode nil "GDB Watcher"
   (setq-local buffer-read-only t)
   (buffer-disable-undo))
 
 (gdb--simple-get-buffer gdb--watcher gdb--watcher-update
   (gdb--rename-buffer "Watcher")
-  (gdb--watcher-mode))
+  (gdb-watcher-mode))
 
 (defun gdb--watcher-draw-var (table-or-parent var)
   (let ((row (gdb--table-add-row
@@ -1127,8 +1159,7 @@ it from the list."
                      (gdb--remove-children-from-hash-table session var)
                      (remhash name (gdb--session-watched-vars session)))))
             finally
-            (when should-update
-              (cl-pushnew 'gdb--watcher (gdb--session-buffer-types-to-update session))))))
+            (when should-update (cl-pushnew 'gdb--watcher (gdb--session-buffer-types-to-update session))))))
 
 (defun gdb--variable-add-children (parent &rest children)
   (gdb--with-valid-session
