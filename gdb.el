@@ -76,7 +76,7 @@ dynamic module.")
 (cl-defstruct gdb--thread id target-id name state frames core)
 (cl-defstruct gdb--frame thread level addr func file line from variables)
 
-(cl-defstruct gdb--breakpoint number type disp enabled addr hits what file line)
+(cl-defstruct gdb--breakpoint number type disp enabled addr hits what file line overlay)
 (defconst gdb--available-breakpoint-types
   '(("Breakpoint" . "")
     ("Temporary Breakpoint" . "-t")
@@ -876,9 +876,8 @@ Create the buffer, if it wasn't already open."
 (defun gdb--complete-path (path)
   "Add TRAMP prefix to PATH returned from GDB output, if needed."
   (gdb--with-valid-session
-   (when path
-     (concat (file-remote-p (buffer-local-value 'default-directory (gdb--comint-get-buffer session)))
-             path))))
+   (when path (concat (file-remote-p (buffer-local-value 'default-directory (gdb--comint-get-buffer session)))
+                      path))))
 
 (defun gdb--display-source-buffer (file line &optional no-mark)
   "Display buffer of the selected source."
@@ -924,7 +923,9 @@ Create the buffer, if it wasn't already open."
          ((eq type 'breakpoint-indicator)
           (let ((breakpoint (alist-get 'breakpoint data))
                 (enabled    (alist-get 'enabled    data)))
+            (setf (gdb--breakpoint-overlay breakpoint) overlay)
             (overlay-put overlay 'gdb--breakpoint breakpoint)
+
             (if (display-images-p)
                 (setq property `(left-fringe gdb--fringe-breakpoint
                                              ,(if enabled 'gdb--breakpoint-enabled 'gdb--breakpoint-disabled)))
@@ -950,12 +951,9 @@ Create the buffer, if it wasn't already open."
                      (or (eq type 'all) (overlay-get ov type)))
             (delete-overlay ov)))))))
 
-(defun gdb--remove-breakpoint-symbol (breakpoint)
-  (let ((file (gdb--breakpoint-file breakpoint))
-        (line (gdb--breakpoint-line breakpoint)))
-    (when (and file line)
-      (with-current-buffer (gdb--find-file file)
-        (remove-overlays nil nil 'gdb--breakpoint breakpoint)))))
+(defun gdb--breakpoint-remove-symbol (breakpoint)
+  (let ((overlay (gdb--breakpoint-overlay breakpoint)))
+    (when overlay (delete-overlay overlay))))
 
 
 ;; ------------------------------------------------------------------------------------------
@@ -1061,7 +1059,7 @@ it from the list."
           (breakpoint (or existing-breakpoint (make-gdb--breakpoint))))
 
      (if existing-breakpoint
-         (gdb--remove-breakpoint-symbol existing-breakpoint)
+         (gdb--breakpoint-remove-symbol existing-breakpoint)
        (setf (gdb--session-breakpoints session) (append (gdb--session-breakpoints session) (list breakpoint))))
 
      (gdb--update-struct gdb--breakpoint breakpoint
@@ -1071,11 +1069,10 @@ it from the list."
                      (and thread (concat " on thread " thread))))
        (file file) (line line))
 
-     (when (and file line)
-       (gdb--place-symbol session (gdb--find-file file) line `((type . breakpoint-indicator)
-                                                               (breakpoint . ,breakpoint)
-                                                               (enabled . ,enabled)
-                                                               (source . t))))
+     (gdb--place-symbol session (gdb--find-file file) line `((type . breakpoint-indicator)
+                                                             (breakpoint . ,breakpoint)
+                                                             (enabled . ,enabled)
+                                                             (source . t)))
 
      (cl-pushnew 'gdb--breakpoints (gdb--session-buffer-types-to-update session)))))
 
@@ -1085,7 +1082,7 @@ it from the list."
    (setf (gdb--session-breakpoints session)
          (cl-delete-if (lambda (breakpoint)
                          (when (= (gdb--breakpoint-number breakpoint) number)
-                           (gdb--remove-breakpoint-symbol breakpoint)
+                           (gdb--breakpoint-remove-symbol breakpoint)
                            t))
                        (gdb--session-breakpoints session)))
    (cl-pushnew 'gdb--breakpoints (gdb--session-buffer-types-to-update session))))
