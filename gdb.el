@@ -192,8 +192,10 @@ This is shared among all sessions.")
           (if gdb--buffer-info
               (let ((type (gdb--buffer-info-type gdb--buffer-info)))
                 (when (eq type 'gdb--inferior-io)
-                  (set-process-sentinel (get-buffer-process buffer) nil)
-                  (delete-process (get-buffer-process buffer)))
+                  (let ((proc (get-buffer-process buffer)))
+                    (when proc
+                      (set-process-sentinel  nil)
+                      (delete-process (get-buffer-process buffer)))))
 
                 (if (memq type gdb--keep-buffer-types)
                     (setq gdb--buffer-info nil)
@@ -538,7 +540,6 @@ If WITH-HEADER is set, then the first row is used as header."
 ;; Comint buffer
 (define-derived-mode gdb-comint-mode comint-mode "GDB Comint"
   "Major mode for interacting with GDB."
-  (set-process-sentinel (get-buffer-process (current-buffer)) #'gdb--comint-sentinel)
   (setq-local comint-input-sender #'gdb--comint-sender)
   (setq-local comint-preoutput-filter-functions '(gdb--output-filter))
 
@@ -550,10 +551,13 @@ If WITH-HEADER is set, then the first row is used as header."
   (setq-local paragraph-start comint-prompt-regexp))
 
 (gdb--simple-get-buffer gdb--comint ignore "Comint"
-  (let ((process-connection-type nil))
-    (make-comint-in-buffer "GDB" buffer "gdb" nil "-i=mi" "-nx"))
   (gdb-comint-mode)
-  (setf (gdb--session-process session) (get-buffer-process buffer))
+  (let ((process-connection-type nil)) (make-comint-in-buffer "GDB" buffer "gdb" nil "-i=mi" "-nx"))
+
+  (let ((proc (get-buffer-process buffer)))
+    (set-process-sentinel proc #'gdb--comint-sentinel)
+    (setf (gdb--session-process session) proc))
+
   (add-hook 'kill-buffer-hook #'gdb--important-buffer-kill-cleanup nil t))
 
 (defun gdb--comint-sender (_process string)
@@ -596,7 +600,8 @@ If THREAD-or-FRAME is:
              nil: the command will run without specifying any thread/frame
 
 When FORCE-STOPPED is non-nil, ensure that exists at least one
-stopped thread before running the command."
+stopped thread before running the command. If FORCE-STOPPED is
+'no-resume, don't resume the stopped thread."
   (gdb--with-valid-session
    "Could not run command because no session is available"
    (let* ((command-parts (and command (split-string command)))
@@ -628,9 +633,10 @@ stopped thread before running the command."
                            (and in-frame  (format " --frame  %d" (gdb--frame-level in-frame)))
                            " " (mapconcat #'identity (cdr command-parts) " ")))
      (gdb--debug-execute-body 'commands (message "Command %s" command))
-     (comint-send-string (gdb--session-process session) (concat command "\n"))
+     (process-send-string (gdb--session-process session) (concat command "\n"))
 
-     (when stopped-thread (gdb--command "-exec-continue" 'gdb--context-ignore stopped-thread)))))
+     (when (and stopped-thread (not (eq force-stopped 'no-resume)))
+       (gdb--command "-exec-continue" 'gdb--context-ignore stopped-thread)))))
 
 (defun gdb--infer-thread-or-frame ()
   ;; (when (not thread)
@@ -665,11 +671,17 @@ stopped thread before running the command."
   (gdb--inferior-io-initialization buffer))
 
 (defun gdb--inferior-io-initialization (buffer)
-  (let* ((inferior-process (get-buffer-process (make-comint-in-buffer "GDB inferior" buffer nil)))
-         (tty (or (process-get inferior-process 'remote-tty)
-                  (process-tty-name inferior-process))))
-    (gdb--command (concat "-inferior-tty-set " tty) 'gdb--context-ignore)
+  (let ((old-process (get-buffer-process buffer)) inferior-process tty)
+    (when old-process (set-process-buffer old-process nil))
+
+    (setq inferior-process (get-buffer-process (make-comint-in-buffer "GDB inferior" buffer nil))
+          tty (or (process-get inferior-process 'remote-tty)
+                  (process-tty-name inferior-process)))
     (set-process-sentinel inferior-process #'gdb--inferior-io-sentinel)
+    (gdb--command (concat "-inferior-tty-set " tty) 'gdb--context-ignore)
+
+    (when old-process (sit-for 1) (delete-process old-process))
+
     (add-hook 'kill-buffer-hook #'gdb--important-buffer-kill-cleanup nil t)))
 
 ;; NOTE(nox): When the debuggee exits, Emacs gets an EIO error and stops listening to the
@@ -679,8 +691,9 @@ stopped thread before running the command."
         (buffer (process-buffer process)))
     (cond ((eq process-status 'failed)
            (set-process-sentinel process nil)
-           (delete-process process)
-           (when buffer (gdb--inferior-io-initialization buffer)))
+           (if buffer
+               (with-current-buffer buffer (gdb--inferior-io-initialization buffer))
+             (delete-process process)))
           ((and (string= str "killed\n") buffer)
            (with-current-buffer buffer (gdb--kill-session (gdb--infer-session t)))))))
 
@@ -1227,7 +1240,7 @@ it from the list."
   "Start execution of the inferior from the beginning.
 If ARG is non-nil, stop at the start of the inferior's main subprogram."
   (interactive "P")
-  (gdb--with-valid-session (gdb--command (concat "-exec-run" (and arg " --start")) nil nil t)))
+  (gdb--with-valid-session (gdb--command (concat "-exec-run" (and arg " --start")) nil nil 'no-resume)))
 
 (defun gdb-start ()
   "Start execution of the inferior from the beginning, stopping at the start of the inferior's main subprogram."
@@ -1253,7 +1266,6 @@ If ARG is non-nil, stop at the start of the inferior's main subprogram."
 
       ;; NOTE(nox): Essential settings
       (gdb--command "-gdb-set mi-async   on"  'gdb--context-ignore)
-      (gdb--command "-gdb-set pagination off" 'gdb--context-ignore)
       (gdb--command "-gdb-set non-stop   on"  'gdb--context-ignore))
 
     (gdb--setup-windows session)
