@@ -44,10 +44,12 @@ This can also be set to t, which means that all debug components are active.")
 
 (defconst gdb--available-contexts
   '(gdb--context-ignore
+    gdb--context-tty-set ;; Data (optional): Old TTY process
     gdb--context-initial-file
     gdb--context-thread-info
     gdb--context-frame-info ;; Data: Thread
     gdb--context-breakpoint-insert
+    gdb--context-breakpoint-delete ;; Data: Breakpoint
     gdb--context-get-variables ;; Data: Frame
     gdb--context-var-create ;; Data: Expression
     gdb--context-var-update
@@ -79,9 +81,9 @@ dynamic module.")
 (cl-defstruct gdb--breakpoint number type disp enabled addr hits what file line overlay)
 (defconst gdb--available-breakpoint-types
   '(("Breakpoint" . "")
-    ("Temporary Breakpoint" . "-t")
-    ("Hardware Breakpoint" . "-h")
-    ("Temporary Hardware Breakpoint" . "-t -h"))
+    ("Temporary Breakpoint" . "-t ")
+    ("Hardware Breakpoint" . "-h ")
+    ("Temporary Hardware Breakpoint" . "-t -h "))
   "Alist of (TYPE . FLAGS).
 Both are strings. FLAGS are the flags to be passed to -break-insert in order to create a
 breakpoint of TYPE.")
@@ -90,7 +92,7 @@ breakpoint of TYPE.")
 (cl-defstruct gdb--watched-var name expr type value thread parent children-count children open flag)
 
 (cl-defstruct gdb--session
-  frame process buffers source-window
+  frame process buffers source-window debuggee-path
   buffer-types-to-update buffers-to-update
   threads selected-thread selected-frame
   breakpoints watched-vars)
@@ -177,7 +179,9 @@ This is shared among all sessions.")
 (defun gdb--kill-session (session)
   (when (and (gdb--session-p session) (memq session gdb--sessions))
     (setq gdb--sessions (delq session gdb--sessions))
-    (when (= (length gdb--sessions) 0) (remove-hook 'delete-frame-functions #'gdb--handle-delete-frame))
+    (when (= (length gdb--sessions) 0)
+      (remove-hook 'delete-frame-functions #'gdb--handle-delete-frame)
+      (gdb-keys-mode -1))
 
     (when (frame-live-p (gdb--session-frame session))
       (set-frame-parameter (gdb--session-frame session) 'gdb--session nil)
@@ -205,6 +209,9 @@ This is shared among all sessions.")
 
     (gdb--remove-all-symbols session 'all)))
 
+
+;; ------------------------------------------------------------------------------------------
+;; Threads and frames
 (defun gdb--get-thread-by-id (id)
   (gdb--with-valid-session
    (when id
@@ -301,6 +308,20 @@ When the thread is switched, the current frame will also be changed."
      (when condition (if frame
                          (gdb--switch-to-frame frame)
                        (gdb--switch-to-thread thread))))))
+
+(defun gdb--ask-for-thread (&optional default)
+  (gdb--with-valid-session
+   (when (gdb--session-threads session)
+     (let* ((default-string nil)
+            (collection (cl-loop for thread in (gdb--session-threads session) with display
+                                 do (setq display (format "%d: %s" (gdb--thread-id thread)
+                                                          (gdb--thread-target-id thread)))
+                                 collect (cons display thread)
+                                 when (eq thread default) do (setq default-string display))))
+       (push (cons "NONE" nil) collection)
+       (unless default-string (setq default-string (caar collection)))
+       (cdr (assoc (completing-read "Thread: " collection nil t nil nil default-string)
+                   collection))))))
 
 
 ;; ------------------------------------------------------------------------------------------
@@ -451,19 +472,22 @@ If WITH-HEADER is set, then the first row is used as header."
            return buffer
            finally return nil))
 
-(defmacro gdb--simple-get-buffer (type update-func name &rest body)
+(defmacro gdb--simple-get-buffer (type update-func name important &rest body)
   "Simple buffer creator/fetcher, for buffers that should be unique in a session."
   (declare (indent defun) (debug (sexp sexp body)))
   (unless (memq type gdb--buffer-types) (error "Type %s does not exist" (symbol-name type)))
   `(defun ,(intern (concat (symbol-name type) "-get-buffer")) (session)
      ,(concat "Creator and fetcher of buffer with type `" (symbol-name type) "'")
      (cond ((gdb--get-buffer-with-type session ',type))
-           (t (let ((buffer (generate-new-buffer "*GDB-temp*")))
+           (t (let ((buffer (generate-new-buffer "*GDB Temporary Name*")))
                 (with-current-buffer buffer
-                  (gdb--rename-buffer ,name)
+                  (gdb--rename-buffer ,name (gdb--session-debuggee-path session))
                   ,@body
                   (setq gdb--buffer-info (make-gdb--buffer-info :session session :type ',type
-                                                                :update-func #',update-func)))
+                                                                :update-func #',update-func))
+                  ,(if important
+                       '(add-hook 'kill-buffer-hook #'gdb--important-buffer-kill-cleanup nil t)
+                     '(add-hook 'kill-buffer-hook #'gdb--buffer-kill-cleanup nil t)))
                 (push buffer (gdb--session-buffers session))
                 (gdb--update-buffer buffer)
                 buffer)))))
@@ -489,14 +513,12 @@ If WITH-HEADER is set, then the first row is used as header."
      (setf (gdb--session-buffers-to-update session) nil
            (gdb--session-buffer-types-to-update session) nil))))
 
-(defmacro gdb--rename-buffer (&optional specific-str)
+(defmacro gdb--rename-buffer (&optional specific-str debuggee-path)
   `(save-match-data
-     (let ((old-name (buffer-name)))
-       (string-match "[ ]+-[ ]+\\(.+\\)\\*\\(<[0-9]+>\\)?$" old-name)
-       (rename-buffer (concat ,(concat "*GDB" (when specific-str (concat ": " specific-str)))
-                              (when (match-string 1 old-name) (concat " - " (match-string 1 old-name)))
-                              "*")
-                      t))))
+     (rename-buffer (concat ,(concat "*GDB" (when specific-str (concat ": " specific-str)))
+                            (when ,debuggee-path (concat " - " (file-name-nondirectory ,debuggee-path)))
+                            "*")
+                    t)))
 
 (defun gdb--rename-buffers-with-debuggee (debuggee-path)
   (let* ((debuggee-name (file-name-nondirectory debuggee-path))
@@ -508,6 +530,10 @@ If WITH-HEADER is set, then the first row is used as header."
                        t)))))
 
 (defun gdb--important-buffer-kill-cleanup () (gdb--kill-session (gdb--infer-session t)))
+
+(defun gdb--buffer-kill-cleanup ()
+  (gdb--with-valid-session
+   (setf (gdb--session-buffers session) (cl-delete (current-buffer) (gdb--session-buffers session) :test 'eq))))
 
 (defsubst gdb--is-buffer-type (type)
   (and gdb--buffer-info (eq (gdb--buffer-info-type gdb--buffer-info) type)))
@@ -551,7 +577,7 @@ If WITH-HEADER is set, then the first row is used as header."
       (gdb--set-window-buffer top-left     (gdb--comint-get-buffer session))
       (gdb--set-window-buffer top-right    (gdb--frames-get-buffer session))
       (gdb--set-window-buffer middle-right (gdb--threads-get-buffer session))
-      (gdb--set-window-buffer bottom-left  (gdb--variables-get-buffer session))
+      (gdb--set-window-buffer bottom-left  (gdb--breakpoints-get-buffer session))
       (gdb--set-window-buffer bottom-right (gdb--watcher-get-buffer session))
       (setf (gdb--session-source-window session) middle-left))))
 
@@ -576,15 +602,13 @@ If WITH-HEADER is set, then the first row is used as header."
   (setq-local paragraph-separate "\\'")
   (setq-local paragraph-start comint-prompt-regexp))
 
-(gdb--simple-get-buffer gdb--comint ignore "Comint"
+(gdb--simple-get-buffer gdb--comint ignore "Comint" t
   (gdb-comint-mode)
   (let ((process-connection-type nil)) (make-comint-in-buffer "GDB" buffer "gdb" nil "-i=mi" "-nx"))
 
   (let ((proc (get-buffer-process buffer)))
     (set-process-sentinel proc #'gdb--comint-sentinel)
-    (setf (gdb--session-process session) proc))
-
-  (add-hook 'kill-buffer-hook #'gdb--important-buffer-kill-cleanup nil t))
+    (setf (gdb--session-process session) proc)))
 
 (defun gdb--comint-sender (_process string)
   "Send user commands from comint."
@@ -664,6 +688,9 @@ stopped thread before running the command. If FORCE-STOPPED is
      (when (and stopped-thread (not (eq force-stopped 'no-resume)))
        (gdb--command "-exec-continue" 'gdb--context-ignore stopped-thread)))))
 
+
+;; ------------------------------------------------------------------------------------------
+;; Infer from point
 (defun gdb--infer-thread-or-frame (&optional not-selected)
   (gdb--with-valid-session
    (let* ((buffer-info gdb--buffer-info)
@@ -680,6 +707,21 @@ stopped thread before running the command. If FORCE-STOPPED is
         (gdb--frame-thread thread-or-frame)
       thread-or-frame)))
 
+(defun gdb--point-location ()
+  "Return a GDB-readable location of the point, in a source file or special buffer."
+  (cond ((buffer-file-name) (format "%s:%d" (buffer-file-name) (gdb--current-line)))))
+
+(defun gdb--infer-breakpoint ()
+  (gdb--with-valid-session
+   (when (buffer-file-name)
+     (let ((file (buffer-file-name))
+           (line (gdb--current-line)))
+       (cl-loop for breakpoint in (gdb--session-breakpoints session)
+                when (and (gdb--breakpoint-file breakpoint) (gdb--breakpoint-line breakpoint)
+                          (string= file (gdb--breakpoint-file breakpoint))
+                          (=       line (gdb--breakpoint-line breakpoint)))
+                return breakpoint)))))
+
 
 ;; ------------------------------------------------------------------------------------------
 ;; Inferior I/O buffer
@@ -687,36 +729,37 @@ stopped thread before running the command. If FORCE-STOPPED is
   "Major mode for interacting with the inferior."
   :syntax-table nil :abbrev-table nil)
 
-(gdb--simple-get-buffer gdb--inferior-io ignore "Inferior I/O"
+(gdb--simple-get-buffer gdb--inferior-io ignore "Inferior I/O" t
   (gdb-inferior-io-mode)
   (gdb--inferior-io-initialization))
 
-(defun gdb--inferior-io-initialization ()
+(defun gdb--inferior-io-initialization (&optional old-proc)
   (gdb--with-valid-session
-   (let* ((buffer (current-buffer))
-          (old-process (get-buffer-process buffer)) inferior-process tty)
-     (when old-process (set-process-buffer old-process nil))
+   (let ((buffer (current-buffer)) inferior-process tty)
+     (when old-proc (set-process-buffer old-proc nil))
 
      (setq inferior-process (get-buffer-process (make-comint-in-buffer "GDB inferior" buffer nil))
-           tty (or (process-get inferior-process 'remote-tty)
-                   (process-tty-name inferior-process)))
-     (set-process-sentinel inferior-process #'gdb--inferior-io-sentinel)
-     (gdb--command (concat "-inferior-tty-set " tty) 'gdb--context-ignore)
+           tty (or (process-get inferior-process 'remote-tty) (process-tty-name inferior-process)))
 
-     (when old-process (sit-for 1) (delete-process old-process))
+     (gdb--command (concat "-inferior-tty-set " tty) (cons 'gdb--context-tty-set old-proc))
 
-     (add-hook 'kill-buffer-hook #'gdb--important-buffer-kill-cleanup nil t))))
+     (set-process-sentinel inferior-process #'gdb--inferior-io-sentinel))))
 
-;; NOTE(nox): When the debuggee exits, Emacs gets an EIO error and stops listening to the
-;; tty. This re-inits the buffer so everything works fine!
-(defun gdb--inferior-io-sentinel (process str)
-  (let ((process-status (process-status process))
-        (buffer (process-buffer process)))
-    (cond ((eq process-status 'failed)
-           (set-process-sentinel process nil)
+(defun gdb--inferior-io-sentinel (proc str)
+  (let ((proc-status (process-status proc))
+        (buffer (process-buffer proc)))
+    (cond ((eq proc-status 'failed)
+           ;; NOTE(nox): When the debuggee exits, Emacs gets an EIO error and stops listening to the tty.
+           ;; This re-inits the buffer so everything works fine!
+           (set-process-sentinel proc nil)
            (if buffer
-               (with-current-buffer buffer (gdb--inferior-io-initialization))
-             (delete-process process)))
+               (with-current-buffer buffer
+                 (save-excursion
+                   (goto-char (point-max))
+                   (insert "\n---------- END ----------\n\n")
+                   (gdb--inferior-io-initialization proc)))
+             (delete-process proc)))
+
           ((and (string= str "killed\n") buffer)
            (with-current-buffer buffer (gdb--kill-session (gdb--infer-session t)))))))
 
@@ -727,13 +770,16 @@ stopped thread before running the command. If FORCE-STOPPED is
   (let ((map (make-sparse-keymap)))
     (define-key map (kbd "p")   #'previous-line)
     (define-key map (kbd "n")   #'next-line)
+    (define-key map (kbd "SPC") #'gdb-select)
+    (define-key map (kbd "c")   #'gdb-continue)
+    (define-key map (kbd "s")   #'gdb-stop)
     map))
 
 (define-derived-mode gdb-threads-mode nil "GDB Threads"
   (setq-local buffer-read-only t)
   (buffer-disable-undo))
 
-(gdb--simple-get-buffer gdb--threads gdb--threads-update "Threads"
+(gdb--simple-get-buffer gdb--threads gdb--threads-update "Threads" nil
   (gdb-threads-mode))
 
 (defun gdb--threads-update ()
@@ -775,13 +821,16 @@ stopped thread before running the command. If FORCE-STOPPED is
   (let ((map (make-sparse-keymap)))
     (define-key map (kbd "p")   #'previous-line)
     (define-key map (kbd "n")   #'next-line)
+    (define-key map (kbd "SPC") #'gdb-select)
+    (define-key map (kbd "c")   #'gdb-continue)
+    (define-key map (kbd "s")   #'gdb-stop)
     map))
 
 (define-derived-mode gdb-frames-mode nil "GDB Frames"
   (setq-local buffer-read-only t)
   (buffer-disable-undo))
 
-(gdb--simple-get-buffer gdb--frames gdb--frames-update "Stack Frames"
+(gdb--simple-get-buffer gdb--frames gdb--frames-update "Stack Frames" nil
   (gdb-frames-mode))
 
 (defun gdb--frames-update ()
@@ -823,7 +872,7 @@ stopped thread before running the command. If FORCE-STOPPED is
   (setq-local buffer-read-only t)
   (buffer-disable-undo))
 
-(gdb--simple-get-buffer gdb--breakpoints gdb--breakpoints-update "Breakpoints"
+(gdb--simple-get-buffer gdb--breakpoints gdb--breakpoints-update "Breakpoints" nil
   (gdb-breakpoints-mode))
 
 (defun gdb--breakpoints-update ()
@@ -863,7 +912,7 @@ stopped thread before running the command. If FORCE-STOPPED is
   (setq-local buffer-read-only t)
   (buffer-disable-undo))
 
-(gdb--simple-get-buffer gdb--variables gdb--variables-update "Variables"
+(gdb--simple-get-buffer gdb--variables gdb--variables-update "Variables" nil
   (gdb-variables-mode))
 
 (defun gdb--variables-update ()
@@ -895,7 +944,7 @@ stopped thread before running the command. If FORCE-STOPPED is
   (setq-local buffer-read-only t)
   (buffer-disable-undo))
 
-(gdb--simple-get-buffer gdb--watcher gdb--watcher-update "Watcher"
+(gdb--simple-get-buffer gdb--watcher gdb--watcher-update "Watcher" nil
   (gdb-watcher-mode))
 
 (defun gdb--watcher-draw-var (table-or-parent var)
@@ -1129,7 +1178,7 @@ it from the list."
        (setf (gdb--session-breakpoints session) (append (gdb--session-breakpoints session) (list breakpoint))))
 
      (gdb--update-struct gdb--breakpoint breakpoint
-       (number number) (type type) (disp disp) (addr addr) (hits times) (enabled )
+       (number number) (type type) (disp disp) (addr addr) (hits times) (enabled enabled)
        (what (concat (or what pending at (gdb--location-string func fullname line))
                      (and cond   (concat " if " cond))
                      (and thread (concat " on thread " thread))))
@@ -1142,15 +1191,16 @@ it from the list."
 
      (cl-pushnew 'gdb--breakpoints (gdb--session-buffer-types-to-update session)))))
 
-(defun gdb--breakpoint-deleted (number)
+(defun gdb--breakpoint-deleted (arg) ;; NOTE(nox): ARG may be ID number or breakpoint object
   (gdb--with-valid-session
-   (setq number (string-to-number number))
-   (setf (gdb--session-breakpoints session)
-         (cl-delete-if (lambda (breakpoint)
-                         (when (= (gdb--breakpoint-number breakpoint) number)
-                           (gdb--breakpoint-remove-symbol breakpoint)
-                           t))
-                       (gdb--session-breakpoints session)))
+   (let ((number (and (eq (type-of arg) 'string) (string-to-number arg))))
+     (setf (gdb--session-breakpoints session)
+           (cl-delete-if (lambda (breakpoint)
+                           (when (cond (number (= (gdb--breakpoint-number breakpoint) number))
+                                       ((eq arg breakpoint)))
+                             (gdb--breakpoint-remove-symbol breakpoint)
+                             t))
+                         (gdb--session-breakpoints session))))
    (cl-pushnew 'gdb--breakpoints (gdb--session-buffer-types-to-update session))))
 
 (defun gdb--add-variables-to-frame (frame &rest args)
@@ -1223,9 +1273,10 @@ it from the list."
   "This mode enables global keybindings to interact with GDB."
   :global t
   :keymap (let ((map (make-sparse-keymap)))
-            (define-key map (kbd "<f5>")   #'gdb-run)
+            (define-key map (kbd "<f5>")   #'gdb-run-or-continue)
             (define-key map (kbd "<C-f5>") #'gdb-start)
             (define-key map (kbd "<S-f5>") #'gdb-kill)
+            (define-key map (kbd "<f9>")   #'gdb-toggle-breakpoint)
             map))
 
 
@@ -1260,18 +1311,20 @@ it from the list."
        (cl-pushnew 'gdb--watcher (gdb--session-buffer-types-to-update session))
        (gdb--update)))))
 
-(defun gdb-run (arg)
+(defun gdb-run (&optional arg)
   "Start execution of the inferior from the beginning.
 If ARG is non-nil, stop at the start of the inferior's main subprogram."
   (interactive "P")
-  (gdb--with-valid-session (gdb--command (concat "-exec-run" (and arg " --start")) nil nil 'no-resume)))
+  (gdb--with-valid-session
+   (when (gdb-kill) (sit-for 0.05))
+   (gdb--command (concat "-exec-run" (and arg " --start")) nil nil 'no-resume)))
 
 (defun gdb-start ()
   "Start execution of the inferior from the beginning, stopping at the start of the inferior's main subprogram."
   (interactive)
   (gdb-run t))
 
-(defun gdb-continue (arg)
+(defun gdb-continue (&optional arg)
   "If ARG is nil, try to resume threads in this order:
   - Inferred thread if it is stopped
   - Selected thread if it is stopped
@@ -1292,7 +1345,7 @@ If ARG is non-nil, resume all threads unconditionally."
          (gdb--command "-exec-continue --all")
        (gdb--command "-exec-continue" nil thread-to-resume)))))
 
-(defun gdb-stop (arg)
+(defun gdb-stop (&optional arg)
   "If ARG is nil, try to stop threads in this order:
   - Inferred thread if it is running
   - Selected thread if it is running
@@ -1313,17 +1366,57 @@ If ARG is non-nil, stop all threads unconditionally."
          (gdb--command "-exec-interrupt --all")
        (gdb--command "-exec-interrupt" nil thread-to-stop)))))
 
-(defun gdb-kill ()
-  "Kill inferior process."
+(defun gdb-run-or-continue ()
+  "When the inferior is not running, start it. Else, run `gdb-continue', which see."
   (interactive)
-  (gdb--with-valid-session (when (gdb--session-threads session) (gdb--command "kill" nil nil 'no-resume))))
+  (gdb--with-valid-session
+   (if (gdb--session-threads session) (gdb-continue) (gdb-run))))
 
 (defun gdb-select ()
   "Select inferred frame or thread."
   (interactive)
   (gdb--with-valid-session
    (let ((thread-or-frame (gdb--infer-thread-or-frame 'not-selected)))
-     (when thread-or-frame (gdb--switch thread-or-frame)))))
+     (when thread-or-frame
+       (gdb--switch thread-or-frame)
+       (gdb--update)))))
+
+(defun gdb-toggle-breakpoint (&optional arg)
+  "Toggle breakpoint in the current location.
+When ARG is non-nil, prompt for additional breakpoint settings."
+  (interactive "P")
+  (gdb--with-valid-session
+   (let ((breakpoint-on-point (gdb--infer-breakpoint))
+         (location (gdb--point-location))
+         location-input type thread condition)
+     (when arg
+       (unless (string= location (setq location-input (read-string "Location: " nil nil location)))
+         (setq location (concat "-f " location-input)
+               breakpoint-on-point nil))
+
+       (setq
+        type (cdr (assoc-string (completing-read "Type of breakpoint: " gdb--available-breakpoint-types nil t
+                                                 nil nil (caar gdb--available-breakpoint-types))
+                                gdb--available-breakpoint-types))
+        thread (gdb--ask-for-thread)
+        condition (replace-regexp-in-string "\\(\\`[ \t\r\n]+\\|[ \t\r\n]+\\'\\)" "" (read-string "Condition: "))))
+
+     (when breakpoint-on-point
+       (gdb--command (format "-break-delete %d" (gdb--breakpoint-number breakpoint-on-point))
+                     (cons 'gdb--context-breakpoint-delete breakpoint-on-point)))
+
+     (when (or arg (not breakpoint-on-point))
+       (gdb--command (concat "-break-insert "
+                             (and (> (length condition) 0) (concat "-c " (gdb--escape-argument condition) " "))
+                             (and thread (format "-p %d " (gdb--thread-id thread)))
+                             type location)
+                     'gdb--context-breakpoint-insert nil t)))))
+
+(defun gdb-kill ()
+  "Kill inferior process."
+  (interactive)
+  (gdb--with-valid-session
+   (when (gdb--session-threads session) (gdb--command "kill" nil nil 'no-resume) t)))
 
 (defun gdb-kill-session ()
   "Kill current GDB session."
@@ -1346,6 +1439,8 @@ If ARG is non-nil, stop all threads unconditionally."
       (gdb--command "-gdb-set mi-async   on"  'gdb--context-ignore)
       (gdb--command "-gdb-set non-stop   on"  'gdb--context-ignore))
 
+    (gdb-keys-mode)
+
     (gdb--setup-windows session)
     session))
 
@@ -1357,6 +1452,7 @@ If ARG is non-nil, stop all threads unconditionally."
                                                          gdb--previous-executable 'file-executable-p)))
         (session (or (gdb--infer-session) (gdb-create-session))))
     (setq gdb--previous-executable debuggee-path)
+    (setf (gdb--session-debuggee-path session) debuggee-path)
 
     (with-selected-frame (gdb--session-frame session)
       (gdb--command (concat "-file-exec-and-symbols " debuggee-path) 'gdb--context-ignore)

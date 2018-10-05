@@ -47,6 +47,8 @@ u32 plugin_is_GPL_compatible;
 #define internWriter(W) W(Nil, nil)                                     \
         W(T, t)                                                         \
         W(ListFunc, list)                                               \
+        W(DeleteProcess, delete-process)                                \
+                                                                        \
         W(ExtractContext, gdb--extract-context)                         \
         W(SetInitialFile, gdb--set-initial-file)                        \
         W(RunningFunc, gdb--running)                                    \
@@ -588,10 +590,12 @@ typedef struct token_context {
         Context_NoContext,
 
         Context_Ignore,
+        Context_TtySet,
         Context_InitialFile,
         Context_ThreadInfo,
         Context_FrameInfo,
         Context_BreakpointInsert,
+        Context_BreakpointDelete,
         Context_GetVariables,
         Context_VariableCreate,
         Context_VariableUpdate,
@@ -627,6 +631,12 @@ static void handleMiResultRecord(emacs_env *Env, mi_result_record *Record, char 
         case GDBWIRE_MI_RUNNING:
         case GDBWIRE_MI_CONNECTED: {
             switch(Context.Type) {
+                case Context_TtySet: {
+                    if(Context.Data != Nil) {
+                        funcall(Env, DeleteProcess, 1, (emacs_value[]){Context.Data});
+                    }
+                } break;
+
                 case Context_InitialFile: {
                     char *File = getResultString(Result, "fullname");
                     char *Line = getResultString(Result, "line");
@@ -640,6 +650,10 @@ static void handleMiResultRecord(emacs_env *Env, mi_result_record *Record, char 
 
                 case Context_BreakpointInsert: {
                     breakpointChange(Env, getResultTuple(Result, "bkpt"));
+                } break;
+
+                case Context_BreakpointDelete: {
+                    funcall(Env, BreakpointDeleted, 1, (emacs_value[]){Context.Data});
                 } break;
 
                 case Context_ThreadInfo: {

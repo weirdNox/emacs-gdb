@@ -36,5 +36,10 @@ int main(int ArgCount, char *ArgVal[]) {
     test *Pointer = 0;
     Pointer = &TestVariable;
 
+    // NOTE(nox): Loop tests
+    for(int TestIndex = 0; TestIndex < 10; ++TestIndex) {
+        printf("Index: %d\n", TestIndex);
+    }
+
     return 0;
 }
