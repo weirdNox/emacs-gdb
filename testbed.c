@@ -17,6 +17,12 @@ void *threadFunction(void *Vargp) {
     return 0;
 }
 
+void functionToCall(char *Arg1, int Arg2) {
+    if(Arg1) {
+        printf("Wowow %s %d\n", Arg1, Arg2);
+    }
+}
+
 int main(int ArgCount, char *ArgVal[]) {
     // NOTE(nox): Thread test
     pthread_t ThreadId;
@@ -40,6 +46,9 @@ int main(int ArgCount, char *ArgVal[]) {
     for(int TestIndex = 0; TestIndex < 10; ++TestIndex) {
         printf("Index: %d\n", TestIndex);
     }
+
+    // NOTE(nox): Function call test
+    functionToCall("Hello", 4);
 
     return 0;
 }
