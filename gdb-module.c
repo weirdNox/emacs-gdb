@@ -74,7 +74,6 @@ internWriter(internVariableWriter);
 
 static struct gdbwire_mi_parser *GdbMiParser;
 static mi_output *ParserOutput;
-static bool IgnoreNextPrompt;
 
 static void *xMalloc(size_t N) {
     void *Result = malloc(N);
@@ -251,6 +250,7 @@ static void breakpointChange(emacs_env *Env, mi_result *Breakpoint) {
         W(Thread, thread),                              \
         W(Condition, cond),                             \
         W(Times, times),                                \
+        W(IgnoreCount, ignore),                         \
         W(What, what)
 
     enum { breakpointVariablesWriter(writeResultKey) };
@@ -510,9 +510,6 @@ static void miAsyncStopped(emacs_env *Env, mi_result *Result, char **PrintString
             break;
         }
     }
-
-    // NOTE(nox): *stopped does not end with a prompt...
-    bufPrintf(*PrintString, "(gdb) ");
 }
 
 static void handleMiOobRecord(emacs_env *Env, mi_oob_record *Record, char **PrintString) {
@@ -710,10 +707,6 @@ static void handleMiResultRecord(emacs_env *Env, mi_result_record *Record, char 
             bufPrintf(*PrintString, "Error while parsing, GdbWire couldn't figure out class of result record!");
         } break;
     }
-
-    if(Context.Type != Context_NoContext) {
-        IgnoreNextPrompt = true;
-    }
 }
 
 // NOTE(weirdNox): Because this is an internal helper function, we will assume that
@@ -746,13 +739,7 @@ static emacs_value handleGdbMiOutput(emacs_env *Env, ptrdiff_t NumberOfArgs,
                 bufPrintf(PrintString, "An error occurred on token %s\n", Output->variant.error.token);
             } break;
 
-            case GDBWIRE_MI_OUTPUT_PROMPT: {
-                if(!IgnoreNextPrompt)
-                {
-                    bufPrintf(PrintString, "(gdb) ");
-                }
-                IgnoreNextPrompt = false;
-            } break;
+            ignoreCase(GDBWIRE_MI_OUTPUT_PROMPT);
         }
     }
     gdbwire_mi_output_free(ParserOutput);
