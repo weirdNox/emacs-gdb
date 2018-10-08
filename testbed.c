@@ -24,6 +24,14 @@ void functionToCall(char *Arg1, int Arg2) {
 }
 
 int main(int ArgCount, char *ArgVal[]) {
+    // NOTE(nox): Arguments test
+    if(ArgCount > 1) {
+        printf("%d arguments were passed to this program.\n", ArgCount-1);
+        for(int I = 1; I < ArgCount; ++I) {
+            printf("Argument %d: %s\n", I, ArgVal[I]);
+        }
+    }
+
     // NOTE(nox): Thread test
     pthread_t ThreadId;
     printf("Before Thread\n");

@@ -94,7 +94,7 @@ breakpoint of TYPE.")
 (cl-defstruct gdb--watched-var name expr type value thread parent children-count children open flag)
 
 (cl-defstruct gdb--session
-  frame process buffers source-window debuggee-path
+  frame process buffers source-window debuggee-path debuggee-args
   buffer-types-to-update buffers-to-update
   threads selected-thread selected-frame
   breakpoints watched-vars)
@@ -1339,18 +1339,24 @@ it from the list."
        (cl-pushnew 'gdb--watcher (gdb--session-buffer-types-to-update session))
        (gdb--update)))))
 
-(defun gdb-run (&optional arg)
+(defun gdb-run (&optional arg break-main)
   "Start execution of the inferior from the beginning.
-If ARG is non-nil, stop at the start of the inferior's main subprogram."
+If ARG is non-nil, ask for program arguments (they will be used for subsequent runs).
+If BREAK-MAIN is non-nil, break at main."
   (interactive "P")
   (gdb--with-valid-session
    (when (gdb-kill) (sit-for 0.05))
-   (gdb--command (concat "-exec-run" (and arg " --start")) nil nil 'no-resume)))
+   (when arg
+     (let ((arguments (read-string "Arguments: " (gdb--session-debuggee-args session))))
+       (setf (gdb--session-debuggee-args session) arguments)
+       (gdb--command (concat "-exec-arguments " arguments))))
+   (gdb--command (concat "-exec-run" (and break-main " --start")))))
 
-(defun gdb-start ()
-  "Start execution of the inferior from the beginning, stopping at the start of the inferior's main subprogram."
-  (interactive)
-  (gdb-run t))
+(defun gdb-start (&optional arg)
+  "Start execution of the inferior from the beginning, stopping at the start of the inferior's main subprogram.
+If ARG is non-nil, ask for program arguments. "
+  (interactive "P")
+  (gdb-run arg t))
 
 (defun gdb-continue (&optional arg)
   "If ARG is nil, try to resume threads in this order:
@@ -1394,11 +1400,11 @@ If ARG is non-nil, stop all threads unconditionally."
          (gdb--command "-exec-interrupt --all")
        (gdb--command "-exec-interrupt" nil thread-to-stop)))))
 
-(defun gdb-run-or-continue ()
+(defun gdb-run-or-continue (&optional arg)
   "When the inferior is not running, start it. Else, run `gdb-continue', which see."
-  (interactive)
+  (interactive "P")
   (gdb--with-valid-session
-   (if (gdb--session-threads session) (gdb-continue) (gdb-run))))
+   (if (gdb--session-threads session) (gdb-continue) (gdb-run arg))))
 
 (defun gdb-select ()
   "Select inferred frame or thread."
@@ -1526,7 +1532,9 @@ If ARG is `dprintf' create a dprintf breakpoint instead."
   "Kill inferior process."
   (interactive)
   (gdb--with-valid-session
-   (when (gdb--session-threads session) (gdb--command "kill" nil nil 'no-resume) t)))
+   (when (gdb--session-threads session)
+     (gdb--command "kill" nil nil 'no-resume)
+     t)))
 
 (defun gdb-kill-session ()
   "Kill current GDB session."
