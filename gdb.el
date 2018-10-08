@@ -395,7 +395,7 @@ All embedded quotes, newlines, and backslashes are preceded with a backslash."
 
 ;; ------------------------------------------------------------------------------------------
 ;; Tables
-(cl-defstruct gdb--table header rows column-sizes)
+(cl-defstruct gdb--table header rows (num-rows 0) column-sizes)
 (cl-defstruct gdb--table-row table columns properties level has-children)
 
 (defsubst gdb--pad-string (string padding) (format (concat "%" (number-to-string padding) "s") (or string "")))
@@ -436,7 +436,8 @@ HAS-CHILDREN should be t when this node has children."
                                    :has-children has-children)))
 
     (gdb--table-update-column-sizes table columns level has-children)
-    (setf (gdb--table-rows table) (append (gdb--table-rows table) (list row)))
+    (setf (gdb--table-rows table) (append (gdb--table-rows table) (list row))
+          (gdb--table-num-rows table) (1+ (gdb--table-num-rows table)))
 
     (when parent (setf (gdb--table-row-has-children parent) 'open))
 
@@ -470,7 +471,9 @@ If WITH-HEADER is set, then the first row is used as header."
                   (list " " (gdb--table-row-string (gdb--table-header table) column-sizes sep))))
 
     (cl-loop for row in (gdb--table-rows table)
-             do (insert (gdb--table-row-string (gdb--table-row-columns    row) column-sizes sep t
+             for row-number from 1 with insert-newline = t
+             when (= row-number (gdb--table-num-rows table)) do (setq insert-newline nil)
+             do (insert (gdb--table-row-string (gdb--table-row-columns    row) column-sizes sep insert-newline
                                                (gdb--table-row-properties row) (gdb--table-row-level row)
                                                (gdb--table-row-has-children row))))))
 
@@ -506,14 +509,14 @@ If WITH-HEADER is set, then the first row is used as header."
 
 (defun gdb--update-buffer (buffer)
   (with-current-buffer buffer
-    (let ((func (gdb--buffer-info-update-func gdb--buffer-info)))
+    (let ((inhibit-read-only t)
+          (func (gdb--buffer-info-update-func gdb--buffer-info)))
       (cl-assert (fboundp func))
       (gdb--measure-time (concat "Calling " (symbol-name func)) (funcall func)))))
 
 (defun gdb--update ()
   (gdb--with-valid-session
-   (let ((inhibit-read-only t)
-         (buffers-to-update (gdb--session-buffers-to-update session))
+   (let ((buffers-to-update (gdb--session-buffers-to-update session))
          (types-to-update   (gdb--session-buffer-types-to-update session)))
      (dolist (buffer (gdb--session-buffers session))
        (let ((buffer-info (buffer-local-value 'gdb--buffer-info buffer)))
