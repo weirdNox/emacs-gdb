@@ -120,7 +120,8 @@ This is shared among all sessions.")
 
 (defconst gdb--trim-regexp "\\(\\`[ \t\r\n]+\\|[ \t\r\n]+\\'\\)")
 
-(defvar gdb--inhibit-display-source nil) ;; let bound
+(defvar gdb--inhibit-display-source nil)
+(defvar gdb--open-buffer-new-frame  nil)
 
 
 ;; ------------------------------------------------------------------------------------------
@@ -555,28 +556,36 @@ If WITH-HEADER is set, then the first row is used as header."
 
 ;; ------------------------------------------------------------------------------------------
 ;; Frames and windows
-(defun gdb--frame-name (&optional debuggee)
-  "Return GDB frame name, possibly using DEBUGGEE file name."
-  (let ((suffix (and (stringp debuggee) (file-executable-p debuggee)
-                     (concat " - " (abbreviate-file-name debuggee)))))
+(defun gdb--frame-name (session)
+  "Return GDB frame name for SESSION, possibly using debuggee file name."
+  (let* ((debuggee (gdb--session-debuggee-path session))
+         (suffix (and (stringp debuggee)
+                      (file-executable-p debuggee)
+                      (concat " - " (abbreviate-file-name debuggee)))))
     (concat "Emacs GDB" suffix)))
 
 (defun gdb--create-frame (session)
   (let ((frame (make-frame `((fullscreen . maximized)
                              (gdb--session . ,session)
-                             (name . ,(gdb--frame-name))))))
+                             (name . ,(gdb--frame-name session))))))
     (setf (gdb--session-frame session) frame)
     (add-hook 'delete-frame-functions #'gdb--handle-delete-frame)
     frame))
 
+;; TODO(nox): Handle this better, because we are expecting a single frame
 (defun gdb--handle-delete-frame (frame)
   (let ((session (frame-parameter frame 'gdb--session)))
-    (when (gdb--session-p session) (gdb--kill-session session))))
+    (when (gdb--session-p session)
+      (unless (catch 'another-frame (dolist (frame (frame-list))
+                                      (when (eq session (frame-parameter frame 'gdb--session))
+                                        (throw 'another-frame t))))
+        (gdb--kill-session session)))))
 
 (defun gdb--set-window-buffer (window buffer)
-  (set-window-dedicated-p window nil)
+  ;;(set-window-dedicated-p window nil)
   (set-window-buffer window buffer)
-  (set-window-dedicated-p window t))
+  ;;(set-window-dedicated-p window t)
+  )
 
 (defun gdb--setup-windows (session)
   (with-selected-frame (gdb--session-frame session)
@@ -596,6 +605,8 @@ If WITH-HEADER is set, then the first row is used as header."
       (setf (gdb--session-source-window session) middle-left))))
 
 (defun gdb--scroll-buffer-to-line (buffer line)
+  (goto-char (point-min))
+  (forward-line (1- line))
   (dolist (window (get-buffer-window-list buffer nil t))
     (with-selected-window window
       (goto-char (point-min))
@@ -956,7 +967,7 @@ stopped thread before running the command. If FORCE-STOPPED is
 
 
 ;; ------------------------------------------------------------------------------------------
-;; Watcher buffers
+;; Watcher buffer
 (defvar gdb-watcher-mode-map
   (let ((map (make-sparse-keymap)))
     (define-key map (kbd "p")   #'previous-line)
@@ -1026,7 +1037,7 @@ Create the buffer, if it wasn't already open."
      (gdb--remove-all-symbols session 'gdb--source-indicator t)
 
      (unless gdb--inhibit-display-source
-       (unless no-mark (gdb--place-symbol session buffer line '((type . source-indicator) (source . t))))
+       (unless no-mark (gdb--place-symbol session buffer line '((type . source-indicator))))
 
        (when (and (window-live-p window) buffer)
          (with-selected-window window
@@ -1040,6 +1051,10 @@ Create the buffer, if it wasn't already open."
              (goto-char (point-min))
              (forward-line (1- line))
              (recenter))))))))
+
+(defun gdb--source-get-buffer ()
+  ;; TODO(nox): Finish this
+  )
 
 
 ;; ------------------------------------------------------------------------------------------
@@ -1079,7 +1094,7 @@ Create the buffer, if it wasn't already open."
         (put-text-property 0 1 'display property dummy-string)
         (overlay-put overlay 'before-string dummy-string)
 
-        (when (alist-get 'source data) (overlay-put overlay 'window (gdb--session-source-window session)))))))
+        (when (eq type 'source-indicator) (overlay-put overlay 'window (gdb--session-source-window session)))))))
 
 (defun gdb--remove-all-symbols (session type &optional source-files-only)
   (dolist (buffer (buffer-list))
@@ -1309,6 +1324,7 @@ it from the list."
             (define-key map (kbd "<C-f10>") #'gdb-until)
             (define-key map (kbd "<C-f11>") #'gdb-advance)
             (define-key map (kbd "<S-f11>") #'gdb-finish)
+            (define-key map (kbd "<f12>")   #'gdb-switch-buffer/body)
             map))
 
 
@@ -1470,6 +1486,34 @@ If ADVANCE is nil, then only run until code inside the same frame."
 
      (when location (gdb--command (concat "-exec-jump " (gdb--escape-argument location)))))))
 
+(defun gdb--switch-buffer (buffer-fun)
+  (gdb--with-valid-session
+   (let ((buffer (funcall buffer-fun session)))
+     (when gdb--open-buffer-new-frame
+       (x-focus-frame (make-frame `((gdb--session . ,session)
+                                    (name . ,(gdb--frame-name session))))))
+     (gdb--set-window-buffer (selected-window) buffer))))
+
+(defhydra gdb-switch-buffer
+  (:hint nil :foreign-keys warn :exit t :body-pre (gdb--with-valid-session
+                                                   "No session available!"
+                                                   (setq gdb--open-buffer-new-frame nil)))
+  "
+Show GDB buffer in %s(if gdb--open-buffer-new-frame \"new frame\" \"selected window\") [_<f12>_]
+_g_db shell     |  _t_hreads  |  _b_reakpoints  |  _v_ariables
+_i_nferior i/o  |  _f_rames   |  ^ ^            |  _w_atcher
+"
+  ("g" (gdb--switch-buffer 'gdb--comint-get-buffer))
+  ("i" (gdb--switch-buffer 'gdb--inferior-io-get-buffer))
+  ("t" (gdb--switch-buffer 'gdb--threads-get-buffer))
+  ("f" (gdb--switch-buffer 'gdb--frames-get-buffer))
+  ("b" (gdb--switch-buffer 'gdb--breakpoints-get-buffer))
+  ("v" (gdb--switch-buffer 'gdb--variables-get-buffer))
+  ("w" (gdb--switch-buffer 'gdb--watcher-get-buffer))
+   ;; TODO(nox): showing the source buffer should set this window as the source window
+  ("s" (setf (gdb--session-source-window (gdb--infer-session)) (selected-window)))
+  ("<f12>" (setq gdb--open-buffer-new-frame (not gdb--open-buffer-new-frame)) :exit nil))
+
 (defun gdb-toggle-breakpoint (&optional arg)
   "Toggle breakpoint in the current location.
 When ARG is non-nil, prompt for additional breakpoint settings.
@@ -1578,7 +1622,7 @@ If ARG is `dprintf' create a dprintf breakpoint instead."
     (with-selected-frame (gdb--session-frame session)
       (gdb--command (concat "-file-exec-and-symbols " debuggee-path) 'gdb--context-ignore)
       (gdb--command "-file-list-exec-source-file" 'gdb--context-initial-file)
-      (set-frame-parameter nil 'name (gdb--frame-name debuggee-path))
+      (set-frame-parameter nil 'name (gdb--frame-name session))
       (gdb--rename-buffers-with-debuggee debuggee-path))))
 
 (provide 'gdb)
