@@ -19,7 +19,7 @@ void *threadFunction(void *Vargp) {
 
 void functionToCall(char *Arg1, int Arg2) {
     if(Arg1) {
-        printf("Wowow %s %d\n", Arg1, Arg2);
+        printf("String: %s\nInteger: %d\n", Arg1, Arg2);
     }
 }
 
@@ -56,7 +56,7 @@ int main(int ArgCount, char *ArgVal[]) {
     }
 
     // NOTE(nox): Function call test
-    functionToCall("Hello", 4);
+    functionToCall("Hello world", 4);
 
     return 0;
 }

@@ -190,10 +190,14 @@ This is shared among all sessions.")
       (remove-hook 'delete-frame-functions #'gdb--handle-delete-frame)
       (gdb-keys-mode -1))
 
+    (cl-loop for frame in (frame-list)
+             when (eq (frame-parameter frame 'gdb--session) session)
+             do (unless (eq frame (gdb--session-frame session))
+                  (delete-frame frame)))
+
     (when (frame-live-p (gdb--session-frame session))
       (set-frame-parameter (gdb--session-frame session) 'gdb--session nil)
-      (when (> (length (frame-list)) 0)
-        (delete-frame (gdb--session-frame session))))
+      (when (> (length (frame-list)) 0) (delete-frame (gdb--session-frame session))))
 
     (set-process-sentinel (gdb--session-process session) nil)
     (delete-process (gdb--session-process session))
@@ -271,9 +275,7 @@ When FRAME is in a different thread, switch to it."
          (gdb--command "-stack-list-variables --simple-values" (cons 'gdb--context-get-variables frame) frame)
        (cl-pushnew 'gdb--variables (gdb--session-buffer-types-to-update session)))
 
-     (if frame
-         (gdb--display-source-buffer (gdb--frame-file frame) (gdb--frame-line frame))
-       (gdb--remove-all-symbols session 'gdb--source-indicator t))
+     (gdb--display-source-buffer)
 
      (let ((buffer (gdb--get-buffer-with-type session 'gdb--frames)) pos)
        (when buffer
@@ -572,20 +574,16 @@ If WITH-HEADER is set, then the first row is used as header."
     (add-hook 'delete-frame-functions #'gdb--handle-delete-frame)
     frame))
 
-;; TODO(nox): Handle this better, because we are expecting a single frame
 (defun gdb--handle-delete-frame (frame)
   (let ((session (frame-parameter frame 'gdb--session)))
-    (when (gdb--session-p session)
-      (unless (catch 'another-frame (dolist (frame (frame-list))
-                                      (when (eq session (frame-parameter frame 'gdb--session))
-                                        (throw 'another-frame t))))
-        (gdb--kill-session session)))))
+    (when (and (gdb--session-p session)
+               (eq frame (gdb--session-frame session)))
+      (gdb--kill-session session))))
 
 (defun gdb--set-window-buffer (window buffer)
-  ;;(set-window-dedicated-p window nil)
+  (set-window-dedicated-p window nil)
   (set-window-buffer window buffer)
-  ;;(set-window-dedicated-p window t)
-  )
+  (set-window-dedicated-p window t))
 
 (defun gdb--setup-windows (session)
   (with-selected-frame (gdb--session-frame session)
@@ -1029,32 +1027,44 @@ Create the buffer, if it wasn't already open."
    (when path (concat (file-remote-p (buffer-local-value 'default-directory (gdb--comint-get-buffer session)))
                       path))))
 
-(defun gdb--display-source-buffer (file line &optional no-mark)
-  "Display buffer of the selected source."
+(defun gdb--display-source-buffer (&optional override-file override-line)
+  "Display buffer of the selected source, and mark the current line.
+The source file and line are fetched from the selected frame, unless OVERRIDE-FILE and OVERRIDE-LINE are set,
+in which case those will be used.
+OVERRIDE-LINE may also be `no-mark', which forces it to not mark any line."
   (gdb--with-valid-session
-   (let ((buffer (and file (gdb--find-file file)))
-         (window (gdb--session-source-window session)))
-     (gdb--remove-all-symbols session 'gdb--source-indicator t)
+   (gdb--remove-all-symbols session 'gdb--source-indicator t)
 
-     (unless gdb--inhibit-display-source
-       (unless no-mark (gdb--place-symbol session buffer line '((type . source-indicator))))
+   (let* ((frame (gdb--session-selected-frame session))
+          (file (cond (override-file)
+                      (frame (gdb--frame-file frame))))
+          (line (cond (override-line (and (not (eq override-line 'no-mark)) override-line))
+                      (frame (gdb--frame-line frame))))
+          (buffer (and file (gdb--find-file file)))
+          (window (gdb--session-source-window session)))
 
-       (when (and (window-live-p window) buffer)
-         (with-selected-window window
-           (switch-to-buffer buffer)
+     (unless (window-valid-p window)
+       (let ((new-frame (make-frame `((gdb--session . ,session)
+                                      (name . ,(gdb--frame-name session))
+                                      (unsplittable . t)))))
+         (x-focus-frame new-frame)
+         (setq window (setf (gdb--session-source-window session) (frame-first-window new-frame)))))
 
-           (if (display-images-p)
-               (set-window-fringes nil 8)
-             (set-window-margins nil 2))
+     (when (and (not gdb--inhibit-display-source) buffer)
+       (with-selected-window window
+         (set-window-dedicated-p window nil)
+         (switch-to-buffer buffer)
 
-           (when line
-             (goto-char (point-min))
-             (forward-line (1- line))
-             (recenter))))))))
+         (if (display-images-p)
+             (set-window-fringes nil 8)
+           (set-window-margins nil 2))
 
-(defun gdb--source-get-buffer ()
-  ;; TODO(nox): Finish this
-  )
+         (when line
+           (goto-char (point-min))
+           (forward-line (1- line))
+           (recenter)))
+
+       (gdb--place-symbol session buffer line '((type . source-indicator)))))))
 
 
 ;; ------------------------------------------------------------------------------------------
@@ -1148,7 +1158,7 @@ it from the list."
        (cl-pushnew 'gdb--frames  (gdb--session-buffer-types-to-update session))))))
 
 (defun gdb--set-initial-file (file line-str)
-  (gdb--display-source-buffer (gdb--complete-path file) (string-to-number line-str) t))
+  (gdb--display-source-buffer (gdb--complete-path file) 'no-mark))
 
 (defun gdb--get-thread-info (&optional id-str)
   (gdb--command (concat "-thread-info " id-str) 'gdb--context-thread-info))
@@ -1489,9 +1499,9 @@ If ADVANCE is nil, then only run until code inside the same frame."
 (defun gdb--switch-buffer (buffer-fun)
   (gdb--with-valid-session
    (let ((buffer (funcall buffer-fun session)))
-     (when gdb--open-buffer-new-frame
-       (x-focus-frame (make-frame `((gdb--session . ,session)
-                                    (name . ,(gdb--frame-name session))))))
+     (when gdb--open-buffer-new-frame (x-focus-frame (make-frame `((gdb--session . ,session)
+                                                                   (name . ,(gdb--frame-name session))
+                                                                   (unsplittable . t)))))
      (gdb--set-window-buffer (selected-window) buffer))))
 
 (defhydra gdb-switch-buffer
@@ -1500,8 +1510,8 @@ If ADVANCE is nil, then only run until code inside the same frame."
                                                    (setq gdb--open-buffer-new-frame nil)))
   "
 Show GDB buffer in %s(if gdb--open-buffer-new-frame \"new frame\" \"selected window\") [_<f12>_]
-_g_db shell     |  _t_hreads  |  _b_reakpoints  |  _v_ariables
-_i_nferior i/o  |  _f_rames   |  ^ ^            |  _w_atcher
+_g_db shell     |  _t_hreads  |  _b_reakpoints  |  _v_ariables  |  _s_ource buffer
+_i_nferior i/o  |  _f_rames   |  ^ ^            |  _w_atcher    |
 "
   ("g" (gdb--switch-buffer 'gdb--comint-get-buffer))
   ("i" (gdb--switch-buffer 'gdb--inferior-io-get-buffer))
@@ -1510,8 +1520,9 @@ _i_nferior i/o  |  _f_rames   |  ^ ^            |  _w_atcher
   ("b" (gdb--switch-buffer 'gdb--breakpoints-get-buffer))
   ("v" (gdb--switch-buffer 'gdb--variables-get-buffer))
   ("w" (gdb--switch-buffer 'gdb--watcher-get-buffer))
-   ;; TODO(nox): showing the source buffer should set this window as the source window
-  ("s" (setf (gdb--session-source-window (gdb--infer-session)) (selected-window)))
+  ("s" (progn (setf (gdb--session-source-window (gdb--infer-session))
+                    (unless gdb--open-buffer-new-frame (selected-window)))
+              (gdb--display-source-buffer)))
   ("<f12>" (setq gdb--open-buffer-new-frame (not gdb--open-buffer-new-frame)) :exit nil))
 
 (defun gdb-toggle-breakpoint (&optional arg)
@@ -1604,9 +1615,9 @@ If ARG is `dprintf' create a dprintf breakpoint instead."
       (gdb--command "-gdb-set mi-async   on"  'gdb--context-ignore)
       (gdb--command "-gdb-set non-stop   on"  'gdb--context-ignore))
 
+    (gdb--setup-windows session)
     (gdb-keys-mode)
 
-    (gdb--setup-windows session)
     session))
 
 ;;;###autoload
