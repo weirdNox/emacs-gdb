@@ -64,7 +64,8 @@ u32 plugin_is_GPL_compatible;
         W(VariableAddChildren, gdb--variable-add-children)              \
         W(SetDisassembly, gdb--set-disassembly)                         \
         W(MakeInstruction, make-gdb--instruction)                       \
-        W(MakeSourceInfo, make-gdb--source-instr-info)
+        W(MakeSourceInfo, make-gdb--source-instr-info)                  \
+        W(PersistThread, gdb--persist-thread)
     ; // Weird indentation...
 
 #define internVariableWriter(Name, ...) static emacs_value Name;
@@ -586,7 +587,6 @@ typedef struct token_context {
     enum {
         Context_NoContext,
 
-        Context_Ignore,
         Context_TtySet,
         Context_InitialFile,
         Context_ThreadInfo,
@@ -598,6 +598,7 @@ typedef struct token_context {
         Context_VariableUpdate,
         Context_VariableListChildren,
         Context_Disassemble,
+        Context_PersistThread,
 
         Context_Size,
     } Type;
@@ -636,12 +637,8 @@ static void handleMiResultRecord(emacs_env *Env, mi_result_record *Record, char 
 
                 case Context_InitialFile: {
                     char *File = getResultString(Result, "fullname");
-                    char *Line = getResultString(Result, "line");
                     if(File) {
-                        emacs_value Args[2];
-                        Args[0] = getEmacsString(Env, File);
-                        Args[1] = getEmacsStringEmpty(Env, Line);
-                        funcall(Env, SetInitialFile, 2, Args);
+                        funcall(Env, SetInitialFile, 1, (emacs_value[]){getEmacsString(Env, File)});
                     }
                 } break;
 
@@ -681,13 +678,16 @@ static void handleMiResultRecord(emacs_env *Env, mi_result_record *Record, char 
                     disassemble(Env, getResultList(Result, "asm_insns"), Context.Data);
                 } break;
 
+                case Context_PersistThread: {
+                    funcall(Env, PersistThread, 0, 0);
+                }
+
                 ignoreDefaultCase();
             }
         } break;
 
         case GDBWIRE_MI_ERROR: {
             switch(Context.Type) {
-                ignoreCase(Context_Ignore);
                 ignoreCase(Context_InitialFile);
 
                 default: {

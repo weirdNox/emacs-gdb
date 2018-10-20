@@ -13,6 +13,8 @@ typedef struct test {
 
 void *threadFunction(void *Vargp) {
     printf("Thread\n");
+    test TestVariable = {2, 3};
+    TestVariable.Number = 10;
     sleep(3);
     return 0;
 }
