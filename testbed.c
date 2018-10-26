@@ -25,6 +25,14 @@ void functionToCall(char *Arg1, int Arg2) {
     }
 }
 
+int factorial(int N) {
+    if(N > 1) {
+        return N*factorial(N-1);
+    } else {
+        return 1;
+    }
+}
+
 int main(int ArgCount, char *ArgVal[]) {
     // NOTE(nox): Arguments test
     if(ArgCount > 1) {
@@ -59,6 +67,9 @@ int main(int ArgCount, char *ArgVal[]) {
 
     // NOTE(nox): Function call test
     functionToCall("Hello world", 4);
+
+    // NOTE(nox): Recursive function teste
+    printf("4! = %d\n", factorial(4));
 
     return 0;
 }

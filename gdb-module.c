@@ -44,27 +44,29 @@ typedef struct gdbwire_mi_parser_callbacks gdbwire_callbacks;
 
 u32 plugin_is_GPL_compatible;
 
-#define internWriter(W) W(Nil, nil)                                     \
-        W(T, t)                                                         \
-        W(ListFunc, list)                                               \
-        W(DeleteProcess, delete-process)                                \
-                                                                        \
-        W(ExtractContext, gdb--extract-context)                         \
-        W(SetInitialFile, gdb--set-initial-file)                        \
-        W(RunningFunc, gdb--running)                                    \
-        W(GetThreadInfo, gdb--get-thread-info)                          \
-        W(UpdateThread, gdb--update-thread)                             \
-        W(AddFramesToThread, gdb--add-frames-to-thread)                 \
-        W(ThreadExited, gdb--thread-exited)                             \
-        W(BreakpointChanged, gdb--breakpoint-changed)                   \
-        W(BreakpointDeleted, gdb--breakpoint-deleted)                   \
-        W(AddVariablesToFrame, gdb--add-variables-to-frame)             \
-        W(NewVariableInfo, gdb--new-variable-info)                      \
-        W(VariableUpdateInfo, gdb--variable-update-info)                \
-        W(VariableAddChildren, gdb--variable-add-children)              \
-        W(SetDisassembly, gdb--set-disassembly)                         \
-        W(MakeInstruction, make-gdb--instruction)                       \
-        W(MakeSourceInfo, make-gdb--source-instr-info)                  \
+#define internWriter(W) W(Nil, nil)                         \
+        W(T, t)                                             \
+        W(ListFunc, list)                                   \
+        W(DeleteProcess, delete-process)                    \
+                                                            \
+        W(ExtractContext, gdb--extract-context)             \
+        W(SetData, gdb--set-data)                           \
+                                                            \
+        W(SetInitialFile, gdb--set-initial-file)            \
+        W(RunningFunc, gdb--running)                        \
+        W(GetThreadInfo, gdb--get-thread-info)              \
+        W(UpdateThread, gdb--update-thread)                 \
+        W(AddFramesToThread, gdb--add-frames-to-thread)     \
+        W(ThreadExited, gdb--thread-exited)                 \
+        W(BreakpointChanged, gdb--breakpoint-changed)       \
+        W(BreakpointDeleted, gdb--breakpoint-deleted)       \
+        W(AddVariablesToFrame, gdb--add-variables-to-frame) \
+        W(NewWatcherInfo, gdb--new-watcher-info)            \
+        W(WatcherUpdateInfo, gdb--watcher-update-info)      \
+        W(WatcherAddChildren, gdb--watcher-add-children)    \
+        W(SetDisassembly, gdb--set-disassembly)             \
+        W(MakeInstruction, make-gdb--instruction)           \
+        W(MakeSourceInfo, make-gdb--source-instr-info)      \
         W(PersistThread, gdb--persist-thread)
     ; // Weird indentation...
 
@@ -156,8 +158,7 @@ static void gdbWireCallback(void *Ctx, mi_output *Output) {
     *WriteTo = Output;
 }
 
-static void *getResultVariable_(mi_result *Result, char *Variable,
-                                enum gdbwire_mi_result_kind Kind) {
+static void *getResultVariable_(mi_result *Result, char *Variable, enum gdbwire_mi_result_kind Kind) {
     void *ToReturn = 0;
     if(Result && Variable) {
         for(; Result; Result = Result->next) {
@@ -170,12 +171,9 @@ static void *getResultVariable_(mi_result *Result, char *Variable,
     return ToReturn;
 }
 
-#define getResultTuple(Result, Variable)                                \
-    (mi_result *)getResultVariable_(Result, Variable, GDBWIRE_MI_TUPLE)
-#define getResultList(Result, Variable)                                 \
-    (mi_result *)getResultVariable_(Result, Variable, GDBWIRE_MI_LIST)
-#define getResultString(Result, Variable)                               \
-    (char *)getResultVariable_(Result, Variable, GDBWIRE_MI_CSTRING)
+#define getResultTuple(Result, Variable) (mi_result *)getResultVariable_(Result, Variable, GDBWIRE_MI_TUPLE)
+#define getResultList(Result, Variable)  (mi_result *)getResultVariable_(Result, Variable, GDBWIRE_MI_LIST)
+#define getResultString(Result, Variable)     (char *)getResultVariable_(Result, Variable, GDBWIRE_MI_CSTRING)
 
 static void getBatchResultString(mi_result *Result, char *Variables[], char *Values[], u32 NumberOfVariables) {
     if(Result && Variables && Values) {
@@ -297,16 +295,16 @@ static void frameInfo(emacs_env *Env, mi_result *List, emacs_value Thread) {
     emacs_value *Args = 0;
     bufPush(Args, Thread);
 
-#define resultVariables(W) W(Level, level),         \
-        W(Address, addr),                           \
-        W(Function, func),                          \
-        W(File, fullname),                          \
-        W(Line, line),                              \
+#define resultKeys(W) W(Level, level),          \
+        W(Address, addr),                       \
+        W(Function, func),                      \
+        W(File, fullname),                      \
+        W(Line, line),                          \
         W(From, from)
 
-    gdbNamesWriter(GdbNames, resultVariables);
-    enumWriter(resultVariables);
-#undef resultVariables
+    gdbNamesWriter(GdbNames, resultKeys);
+    enumWriter(resultKeys);
+#undef resultKeys
 
     for(mi_result *Frame = List; Frame; Frame = Frame->next) {
         char *Values[Result_Count] = {};
@@ -326,10 +324,10 @@ static void getVariables(emacs_env *Env, mi_result *List, emacs_value Frame) {
     emacs_value *Args = 0;
     bufPush(Args, Frame);
 
-#define resultVariables(W) W(Name, name), W(Type, type), W(Value, value)
-    gdbNamesWriter(GdbNames, resultVariables);
-    enumWriter(resultVariables);
-#undef  resultVariables
+#define resultKeys(W) W(Name, name), W(Type, type), W(Value, value)
+    gdbNamesWriter(GdbNames, resultKeys);
+    enumWriter(resultKeys);
+#undef  resultKeys
 
     for(mi_result *Variable = List; Variable; Variable = Variable->next) {
         char *Values[Result_Count] = {};
@@ -345,39 +343,39 @@ static void getVariables(emacs_env *Env, mi_result *List, emacs_value Frame) {
     bufFree(Args);
 }
 
-static void createVariable(emacs_env *Env, mi_result *Tuple, emacs_value Expr) {
-#define resultVariables(W) W(Name, name),                               \
-        W(NumChild, numchild),                                          \
-        W(Value, value),                                                \
-        W(Type, type),                                                  \
+static void watcherCreate(emacs_env *Env, mi_result *Tuple, emacs_value Data) {
+#define resultKeys(W) W(Name, name),            \
+        W(NumChild, numchild),                  \
+        W(Value, value),                        \
+        W(Type, type),                          \
         W(ThreadId, thread-id)
 
-    gdbNamesWriter(GdbNames, resultVariables);
-    enumWriter(resultVariables);
-#undef resultVariables
+    gdbNamesWriter(GdbNames, resultKeys);
+    enumWriter(resultKeys);
+#undef resultKeys
 
     char *Values[Result_Count] = {};
     getBatchResultString(Tuple, GdbNames, Values, Result_Count);
 
     emacs_value Args[1 + Result_Count];
-    Args[0] = Expr;
+    Args[0] = Data;
     getEmacsStrings(Env, Values, Args+1, Result_Count, false);
-    funcall(Env, NewVariableInfo, arrayCount(Args), Args);
+    funcall(Env, NewWatcherInfo, arrayCount(Args), Args);
 }
 
-static void updateVariables(emacs_env *Env, mi_result *List) {
+static void watchersUpdate(emacs_env *Env, mi_result *List) {
     emacs_value *Args = 0;
 
-#define resultVariables(W) W(Name, name),       \
+#define resultKeys(W) W(Name, name),            \
         W(Value, value),                        \
         W(InScope, in_scope),                   \
         W(TypeChanged, type_changed),           \
         W(NewType, new_type),                   \
         W(NewNumChildren, new_num_children)
 
-    gdbNamesWriter(GdbNames, resultVariables);
-    enumWriter(resultVariables);
-#undef  resultVariables
+    gdbNamesWriter(GdbNames, resultKeys);
+    enumWriter(resultKeys);
+#undef  resultKeys
 
     for(mi_result *Variable = List; Variable; Variable = Variable->next) {
         char *Values[Result_Count] = {};
@@ -389,24 +387,24 @@ static void updateVariables(emacs_env *Env, mi_result *List) {
         bufPush(Args, funcall(Env, ListFunc, Result_Count, ListValues));
     }
 
-    funcall(Env, VariableUpdateInfo, bufLen(Args), Args);
+    funcall(Env, WatcherUpdateInfo, bufLen(Args), Args);
     bufFree(Args);
 }
 
-static void variableAddChildren(emacs_env *Env, mi_result *List, emacs_value Variable) {
+static void watcherAddChildren(emacs_env *Env, mi_result *List, emacs_value Watcher) {
     emacs_value *Args = 0;
-    bufPush(Args, Variable);
+    bufPush(Args, Watcher);
 
-#define resultVariables(W) W(Name, name),       \
+#define resultKeys(W) W(Name, name),            \
         W(Expr, exp),                           \
         W(NumChildren, numchild),               \
         W(Value, value),                        \
         W(Type, type),                          \
         W(ThreadId, thread-id)
 
-    gdbNamesWriter(GdbNames, resultVariables);
-    enumWriter(resultVariables);
-#undef  resultVariables
+    gdbNamesWriter(GdbNames, resultKeys);
+    enumWriter(resultKeys);
+#undef  resultKeys
 
     for(mi_result *Child = List; Child; Child = Child->next) {
         char *Values[Result_Count] = {};
@@ -418,7 +416,7 @@ static void variableAddChildren(emacs_env *Env, mi_result *List, emacs_value Var
         bufPush(Args, funcall(Env, ListFunc, Result_Count, ListValues));
     }
 
-    funcall(Env, VariableAddChildren, bufLen(Args), Args);
+    funcall(Env, WatcherAddChildren, bufLen(Args), Args);
     bufFree(Args);
 }
 
@@ -594,11 +592,12 @@ typedef struct token_context {
         Context_BreakpointInsert,
         Context_BreakpointDelete,
         Context_GetVariables,
-        Context_VariableCreate,
-        Context_VariableUpdate,
-        Context_VariableListChildren,
+        Context_WatcherCreate,
+        Context_WatcherUpdate,
+        Context_WatcherListChildren,
         Context_Disassemble,
         Context_PersistThread,
+        Context_GetData,
 
         Context_Size,
     } Type;
@@ -662,16 +661,16 @@ static void handleMiResultRecord(emacs_env *Env, mi_result_record *Record, char 
                     getVariables(Env, getResultList(Result, "variables"), Context.Data);
                 } break;
 
-                case Context_VariableCreate: {
-                    createVariable(Env, Result, Context.Data);
+                case Context_WatcherCreate: {
+                    watcherCreate(Env, Result, Context.Data);
                 } break;
 
-                case Context_VariableUpdate: {
-                    updateVariables(Env, getResultList(Result, "changelist"));
+                case Context_WatcherUpdate: {
+                    watchersUpdate(Env, getResultList(Result, "changelist"));
                 } break;
 
-                case Context_VariableListChildren: {
-                    variableAddChildren(Env, getResultList(Result, "children"), Context.Data);
+                case Context_WatcherListChildren: {
+                    watcherAddChildren(Env, getResultList(Result, "children"), Context.Data);
                 } break;
 
                 case Context_Disassemble: {
@@ -680,7 +679,19 @@ static void handleMiResultRecord(emacs_env *Env, mi_result_record *Record, char 
 
                 case Context_PersistThread: {
                     funcall(Env, PersistThread, 0, 0);
-                }
+                } break;
+
+                case Context_GetData: {
+                    ptrdiff_t Size;
+                    Env->copy_string_contents(Env, Context.Data, 0, &Size);
+                    char *Key = xMalloc(Size);
+                    Env->copy_string_contents(Env, Context.Data, Key, &Size);
+
+                    char *String = getResultString(Result, Key);
+                    free(Key);
+
+                    funcall(Env, SetData, 1, (emacs_value[]){getEmacsString(Env, String)});
+                } break;
 
                 ignoreDefaultCase();
             }
