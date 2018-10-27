@@ -51,6 +51,7 @@ u32 plugin_is_GPL_compatible;
                                                             \
         W(ExtractContext, gdb--extract-context)             \
         W(SetData, gdb--set-data)                           \
+        W(LogError, gdb--log-error)                         \
                                                             \
         W(SetInitialFile, gdb--set-initial-file)            \
         W(RunningFunc, gdb--running)                        \
@@ -713,6 +714,7 @@ static void handleMiResultRecord(emacs_env *Env, mi_result_record *Record, char 
                     char *Message = getResultString(Result, "msg");
                     if(Message) {
                         bufPrintf(*PrintString, "%s\n", Result->variant.cstring);
+                        funcall(Env, LogError, 1, (emacs_value[]){getEmacsString(Env, Message)});
                     }
                 } break;
             }

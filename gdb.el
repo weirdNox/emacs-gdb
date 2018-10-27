@@ -1212,6 +1212,8 @@ it from the list."
                      finally return 0)
             data))))
 
+(defun gdb--log-error (err) (message "GDB Error: %s" err))
+
 (defun gdb--running (thread-id-str)
   (gdb--with-valid-session
    (let ((thread (gdb--get-thread-by-id (string-to-number thread-id-str)))
