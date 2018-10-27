@@ -53,6 +53,7 @@ This can also be set to t, which means that all debug components are active.")
     gdb--context-watcher-create ;; Data: (Expression . WatcherToReplace)
     gdb--context-watcher-update
     gdb--context-watcher-list-children
+    gdb--context-watcher-change-format ;; Data: Watcher
     gdb--context-disassemble ;; Data: Disassemble buffer
     gdb--context-persist-thread
     gdb--context-get-data ;; Data: Result name string
@@ -1027,6 +1028,7 @@ stopped thread before running the command. If FORCE-STOPPED is
     (define-key map (kbd      "RET") #'gdb-watcher-assign)
     (define-key map (kbd "<return>") #'gdb-watcher-assign)
     (define-key map (kbd        "e") #'gdb-watcher-edit-expression)
+    (define-key map (kbd        "f") #'gdb-watcher-change-format)
     (define-key map (kbd        "d") #'gdb-watcher-duplicate)
     (define-key map (kbd      "SPC") #'gdb-watcher-toggle)
     (define-key map (kbd      "TAB") #'gdb-watcher-toggle)
@@ -1393,6 +1395,11 @@ it from the list."
             finally (setf (gdb--watcher-children parent) (nreverse (gdb--watcher-children parent))))
    (cl-pushnew 'gdb--watchers (gdb--session-buffer-types-to-update session))))
 
+(defun gdb--watcher-format-change (watcher new-value)
+  (gdb--with-valid-session
+   (setf (gdb--watcher-value watcher) new-value)
+   (cl-pushnew 'gdb--watchers (gdb--session-buffer-types-to-update session))))
+
 ;; (defun gdb--set-disassembly (buffer list with-source-info)
 ;;   (when (buffer-live-p buffer)
 ;;     (with-current-buffer buffer
@@ -1461,7 +1468,7 @@ it from the list."
    (when (gdb--is-buffer-type 'gdb--watchers)
      (let ((frame (gdb--session-selected-frame session))
            (watcher (get-text-property (line-beginning-position) 'gdb--watcher)))
-       (unless frame   (user-error "No selected frame"))
+       (unless frame   (user-error "No frame is selected"))
        (unless watcher (user-error "No leaf watcher under cursor"))
        (unless (string= (gdb--get-data (concat "-var-show-attributes " (gdb--watcher-name watcher)) "attr")
                         "editable")
@@ -1487,9 +1494,20 @@ it from the list."
   (gdb--with-valid-session
    (when (gdb--is-buffer-type 'gdb--watchers)
      (let ((watcher (get-text-property (line-beginning-position) 'gdb--watcher)))
-       (when (or (not watcher)) (user-error "No watcher under cursor"))
+       (unless watcher (user-error "No watcher under cursor"))
        (gdb-watcher-add-expression (gdb--get-data (concat "-var-info-path-expression " (gdb--watcher-name watcher))
                                                   "path_expr"))))))
+
+(defun gdb-watcher-change-format ()
+  (interactive)
+  (gdb--with-valid-session
+   (when (gdb--is-buffer-type 'gdb--watchers)
+     (let ((watcher (get-text-property (line-beginning-position) 'gdb--watcher)))
+       (unless watcher (user-error "No watcher under cursor"))
+       (gdb--command (format "-var-set-format %s %s" (gdb--watcher-name watcher)
+                             (downcase (completing-read "Format: " '("Natural" "Binary" "Octal" "Decimal"
+                                                                     "Hexadecimal" "Zero-Hexadecimal"))))
+                     (cons 'gdb--context-watcher-change-format watcher))))))
 
 (defun gdb-watcher-delete ()
   (interactive)

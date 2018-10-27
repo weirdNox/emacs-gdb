@@ -64,6 +64,7 @@ u32 plugin_is_GPL_compatible;
         W(NewWatcherInfo, gdb--new-watcher-info)            \
         W(WatcherUpdateInfo, gdb--watcher-update-info)      \
         W(WatcherAddChildren, gdb--watcher-add-children)    \
+        W(WatcherFormatChange, gdb--watcher-format-change)  \
         W(SetDisassembly, gdb--set-disassembly)             \
         W(MakeInstruction, make-gdb--instruction)           \
         W(MakeSourceInfo, make-gdb--source-instr-info)      \
@@ -595,6 +596,7 @@ typedef struct token_context {
         Context_WatcherCreate,
         Context_WatcherUpdate,
         Context_WatcherListChildren,
+        Context_WatcherChangeFormat,
         Context_Disassemble,
         Context_PersistThread,
         Context_GetData,
@@ -671,6 +673,12 @@ static void handleMiResultRecord(emacs_env *Env, mi_result_record *Record, char 
 
                 case Context_WatcherListChildren: {
                     watcherAddChildren(Env, getResultList(Result, "children"), Context.Data);
+                } break;
+
+                case Context_WatcherChangeFormat: {
+                    char *Value = getResultString(Result, "value");
+                    funcall(Env, WatcherFormatChange, 2,
+                            (emacs_value[]){Context.Data, getEmacsString(Env, Value)});
                 } break;
 
                 case Context_Disassemble: {
