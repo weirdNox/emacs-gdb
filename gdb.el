@@ -270,7 +270,9 @@ When FRAME is in a different thread, switch to it."
    (unless (eq frame (gdb--session-selected-frame session))
      (setf (gdb--session-selected-frame session) frame)
 
-     (when frame (gdb--switch-to-thread (gdb--frame-thread frame)))
+     (when frame
+       (gdb--switch-to-thread (gdb--frame-thread frame))
+       (gdb--command "-var-update --all-values *" 'gdb--context-watcher-update frame))
 
      (if (and frame (not (gdb--frame-variables frame)))
          (gdb--command "-stack-list-variables --simple-values" (cons 'gdb--context-get-variables frame) frame)
@@ -1040,22 +1042,24 @@ stopped thread before running the command. If FORCE-STOPPED is
   (gdb-watchers-mode))
 
 (defun gdb--watcher-draw (table-or-parent watcher tick watcher-under-cursor)
-  (let ((row (gdb--table-add-row
-              table-or-parent
-              (list (gdb--add-face (gdb--watcher-expr watcher)  'font-lock-variable-name-face)
-                    (gdb--add-face (gdb--watcher-type watcher)  'font-lock-type-face)
-                    (if (eq (gdb--watcher-flag watcher) 'out-of-scope)
-                        (eval-when-compile (propertize "Out of scope" 'face 'font-lock-comment-face))
-                      (gdb--add-face (gdb--watcher-value watcher)
-                                     (and (eq (gdb--watcher-flag watcher) tick) 'error))))
-              (list 'gdb--watcher watcher) (> (gdb--watcher-children-count watcher) 0)))
-        (children (gdb--watcher-children watcher)))
+  (let* ((out-of-scope (eq (gdb--watcher-flag watcher) 'out-of-scope))
+         (row (gdb--table-add-row
+               table-or-parent
+               (list (gdb--add-face (gdb--watcher-expr watcher)  'font-lock-variable-name-face)
+                     (gdb--add-face (gdb--watcher-type watcher)  'font-lock-type-face)
+                     (if out-of-scope
+                         (eval-when-compile (propertize "Out of scope" 'face 'font-lock-comment-face))
+                       (gdb--add-face (gdb--watcher-value watcher)
+                                      (and (eq (gdb--watcher-flag watcher) tick) 'error))))
+               (list 'gdb--watcher watcher)
+               (and (not out-of-scope) (> (gdb--watcher-children-count watcher) 0))))
+         (children (gdb--watcher-children watcher)))
 
     (when (eq watcher watcher-under-cursor)
       (let ((table (gdb--get-table-from-table-or-parent table-or-parent)))
         (setf (gdb--table-target-line table) (gdb--table-num-rows table))))
 
-    (when (gdb--watcher-open watcher)
+    (when (and (not out-of-scope) (gdb--watcher-open watcher))
       (cl-loop for child in children
                do (gdb--watcher-draw row child tick watcher-under-cursor)))))
 
@@ -1354,10 +1358,12 @@ it from the list."
               (let ((watcher (gethash name (gdb--session-watchers session))))
                 (cond ((string= in-scope "true")
                        (when (string= type-changed "true")
+                         ;; NOTE(nox): Children are automatically deleted
                          (gdb--watchers-remove-records session (gdb--watcher-children watcher))
                          (setf (gdb--watcher-type watcher) new-type
-                               (gdb--watcher-children watcher) nil ;; NOTE(nox): Automatically deleted
-                               (gdb--watcher-children-count watcher) (gdb--stn new-children-count)))
+                               (gdb--watcher-children watcher) nil
+                               (gdb--watcher-children-count watcher) (gdb--stn new-children-count)
+                               (gdb--watcher-open watcher) nil))
                        (setf (gdb--watcher-value watcher) value
                              (gdb--watcher-flag  watcher) tick))
 
@@ -1405,7 +1411,7 @@ it from the list."
   "This mode enables global keybindings to interact with GDB."
   :global t
   :keymap (let ((map (make-sparse-keymap)))
-            (define-key map (kbd  "<f5>")   #'gdb-run-or-continue)
+            (define-key map (kbd    "<f5>")   #'gdb-run-or-continue)
             (define-key map (kbd  "<C-f5>") #'gdb-start)
             (define-key map (kbd  "<S-f5>") #'gdb-kill)
             (define-key map (kbd    "<f8>") #'gdb-watcher-add-expression)
