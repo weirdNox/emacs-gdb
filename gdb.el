@@ -645,12 +645,24 @@ If WITH-HEADER is set, then the first row is used as header."
       (setf (gdb--session-source-window session) top-left))))
 
 (defun gdb--scroll-buffer-to-line (buffer line)
-  (goto-char (point-min))
-  (forward-line (1- line))
+  (with-current-buffer buffer
+    (goto-char (point-min))
+    (forward-line (1- line)))
+
   (dolist (window (get-buffer-window-list buffer nil t))
     (with-selected-window window
       (goto-char (point-min))
       (forward-line (1- line)))))
+
+(defun gdb--scroll-buffer-to-last-line (buffer)
+  (with-current-buffer buffer
+    (forward-line most-positive-fixnum)
+    (beginning-of-line))
+
+  (dolist (window (get-buffer-window-list buffer nil t))
+    (with-selected-window window
+      (forward-line most-positive-fixnum)
+      (beginning-of-line))))
 
 
 ;; ------------------------------------------------------------------------------------------
@@ -973,8 +985,12 @@ stopped thread before running the command. If FORCE-STOPPED is
 ;; Variables buffer
 (defvar gdb-variables-mode-map
   (let ((map (make-sparse-keymap)))
-    (define-key map (kbd "p")   #'previous-line)
-    (define-key map (kbd "n")   #'next-line)
+    (define-key map (kbd          "p") #'previous-line)
+    (define-key map (kbd          "n") #'next-line)
+    (define-key map (kbd        "RET") #'gdb-create-watcher-from-variable)
+    (define-key map (kbd   "<return>") #'gdb-create-watcher-from-variable)
+    (define-key map (kbd      "S-RET") #'gdb-create-watcher-from-variable-ask)
+    (define-key map (kbd "<S-return>") #'gdb-create-watcher-from-variable-ask)
     map))
 
 (define-derived-mode gdb-variables-mode nil "GDB Variables"
@@ -994,7 +1010,8 @@ stopped thread before running the command. If FORCE-STOPPED is
        (gdb--table-add-row
         table (list (propertize (gdb--variable-name  variable) 'face 'font-lock-variable-name-face)
                     (propertize (gdb--variable-type  variable) 'face 'font-lock-type-face)
-                    (or         (gdb--variable-value variable) "<Composite type>"))))
+                    (or         (gdb--variable-value variable) "<Composite type>"))
+        (list 'gdb--var variable)))
      (gdb--table-insert table))))
 
 
@@ -1411,7 +1428,8 @@ it from the list."
   (gdb--with-valid-session
    (unless (gdb--session-selected-frame session) (user-error "No selected frame"))
 
-   (let ((expression (gdb--read-line "Expression: " default)))
+   (let ((expression (cond ((consp default) (car default))
+                           (t (gdb--read-line "Expression: " default)))))
      (when (and expression (not (and watcher-to-replace (string= expression default))))
        (gdb--command (format "-var-create - @ \"%s\"" expression)
                      (cons 'gdb--context-watcher-create (cons expression watcher-to-replace))
@@ -1477,6 +1495,20 @@ it from the list."
        (gdb--watchers-remove-records session (list watcher))
        (cl-pushnew 'gdb--watchers (gdb--session-buffer-types-to-update session))
        (gdb--update)))))
+
+(defun gdb-create-watcher-from-variable (arg)
+  (interactive "P")
+  (gdb--with-valid-session
+   (when (gdb--is-buffer-type 'gdb--variables)
+     (let ((var (get-text-property (line-beginning-position) 'gdb--var)))
+       (unless var (user-error "No variable selected"))
+       (gdb-watcher-add-expression (if arg (gdb--variable-name var) (cons (gdb--variable-name var) nil)))
+       (accept-process-output (gdb--session-process session) 0.5)
+       (gdb--scroll-buffer-to-last-line (gdb--watchers-get-buffer session))))))
+
+(defun gdb-create-watcher-from-variable-ask ()
+  (interactive)
+  (gdb-create-watcher-from-variable t))
 
 (defun gdb-run (&optional arg break-main)
   "Start execution of the inferior from the beginning.
