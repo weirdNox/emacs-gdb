@@ -83,7 +83,7 @@ dynamic module.")
 
 (cl-defstruct gdb--thread
   id target-id name state frames core
-  (registers-tick most-negative-fixnum) (registers (make-hash-table :size 250)))
+  (registers-tick most-negative-fixnum) (registers (make-hash-table :size 250)) (registers-format "N"))
 
 (cl-defstruct gdb--frame thread level addr func file line from variables)
 
@@ -998,10 +998,10 @@ stopped thread before running the command. If FORCE-STOPPED is
   (let ((map (make-sparse-keymap)))
     (define-key map (kbd          "p") #'previous-line)
     (define-key map (kbd          "n") #'next-line)
-    (define-key map (kbd        "RET") #'gdb-create-watcher-from-variable)
-    (define-key map (kbd   "<return>") #'gdb-create-watcher-from-variable)
-    (define-key map (kbd      "S-RET") #'gdb-create-watcher-from-variable-ask)
-    (define-key map (kbd "<S-return>") #'gdb-create-watcher-from-variable-ask)
+    (define-key map (kbd        "RET") #'gdb-create-watcher-from)
+    (define-key map (kbd   "<return>") #'gdb-create-watcher-from)
+    (define-key map (kbd      "S-RET") #'gdb-create-watcher-from-ask)
+    (define-key map (kbd "<S-return>") #'gdb-create-watcher-from-ask)
     map))
 
 (define-derived-mode gdb-variables-mode nil "GDB Variables"
@@ -1098,11 +1098,11 @@ stopped thread before running the command. If FORCE-STOPPED is
   (let ((map (make-sparse-keymap)))
     (define-key map (kbd          "p") #'previous-line)
     (define-key map (kbd          "n") #'next-line)
-    ;; TODO(nox): Create the analogous commands or change these
-    ;; (define-key map (kbd        "RET") #'gdb-create-watcher-from-variable)
-    ;; (define-key map (kbd   "<return>") #'gdb-create-watcher-from-variable)
-    ;; (define-key map (kbd      "S-RET") #'gdb-create-watcher-from-variable-ask)
-    ;; (define-key map (kbd "<S-return>") #'gdb-create-watcher-from-variable-ask)
+    (define-key map (kbd          "f") #'gdb-registers-change-format)
+    (define-key map (kbd        "RET") #'gdb-create-watcher-from)
+    (define-key map (kbd   "<return>") #'gdb-create-watcher-from)
+    (define-key map (kbd      "S-RET") #'gdb-create-watcher-from-ask)
+    (define-key map (kbd "<S-return>") #'gdb-create-watcher-from-ask)
     map))
 
 (define-derived-mode gdb-registers-mode nil "GDB Registers"
@@ -1110,7 +1110,7 @@ stopped thread before running the command. If FORCE-STOPPED is
   (buffer-disable-undo))
 
 (gdb--simple-get-buffer gdb--registers gdb--registers-update "Registers" nil
-  (gdb-watchers-mode))
+  (gdb-registers-mode))
 
 (defun gdb--registers-update ()
   (gdb--with-valid-session
@@ -1313,14 +1313,15 @@ it from the list."
        (gdb--command "-stack-list-frames" (cons 'gdb--context-frame-info thread) thread)
        (gdb--command "-var-update --all-values *" 'gdb--context-watcher-update thread)
 
-       ;; TODO(): FORMATS!!!!!
        (cond ((= (gdb--thread-registers-tick thread) most-negative-fixnum)
               (gdb--command "-data-list-changed-registers" nil thread) ;; NOTE(nox): Ignored
-              (gdb--command "-data-list-register-values --skip-unavailable x"
+              (gdb--command (concat "-data-list-register-values --skip-unavailable "
+                                    (gdb--thread-registers-format thread))
                             (cons 'gdb--context-registers-update thread) thread))
              (t
-              (gdb--command "-data-list-changed-registers"
-                            (cons 'gdb--context-registers-get-changed (cons "x" thread)) thread))))
+              (gdb--command "-data-list-changed-registers" (cons 'gdb--context-registers-get-changed
+                                                                 (cons (gdb--thread-registers-format thread) thread))
+                            thread))))
 
       (t
        (cl-pushnew 'gdb--threads (gdb--session-buffer-types-to-update session))
@@ -1584,7 +1585,8 @@ it from the list."
        (unless watcher (user-error "No watcher under cursor"))
        (gdb--command (format "-var-set-format %s %s" (gdb--watcher-name watcher)
                              (downcase (completing-read "Format: " '("Natural" "Binary" "Octal" "Decimal"
-                                                                     "Hexadecimal" "Zero-Hexadecimal"))))
+                                                                     "Hexadecimal" "Zero-Hexadecimal")
+                                                        nil t)))
                      (cons 'gdb--context-watcher-change-format watcher))))))
 
 (defun gdb-watcher-delete ()
@@ -1598,19 +1600,29 @@ it from the list."
        (cl-pushnew 'gdb--watchers (gdb--session-buffer-types-to-update session))
        (gdb--update)))))
 
-(defun gdb-create-watcher-from-variable (arg)
+(defun gdb-create-watcher-from (arg)
   (interactive "P")
   (gdb--with-valid-session
-   (when (gdb--is-buffer-type 'gdb--variables)
-     (let ((var (get-text-property (line-beginning-position) 'gdb--var)))
-       (unless var (user-error "No variable selected"))
-       (gdb-watcher-add-expression (if arg (gdb--variable-name var) (cons (gdb--variable-name var) nil)))
+   (let ((expression
+          (cond
+           ((gdb--is-buffer-type 'gdb--variables)
+            (let ((var (get-text-property (line-beginning-position) 'gdb--var)))
+              (unless var (user-error "No variable selected"))
+              (gdb--variable-name var)))
+
+           ((gdb--is-buffer-type 'gdb--registers)
+            (let ((register (get-text-property (line-beginning-position) 'gdb--register)))
+              (unless register (user-error "No register selected"))
+              (concat "$" (gdb--register-name register)))))))
+
+     (when expression
+       (gdb-watcher-add-expression (if arg expression (cons expression nil)))
        (accept-process-output (gdb--session-process session) 0.5)
        (gdb--scroll-buffer-to-last-line (gdb--watchers-get-buffer session))))))
 
-(defun gdb-create-watcher-from-variable-ask ()
+(defun gdb-create-watcher-from-ask ()
   (interactive)
-  (gdb-create-watcher-from-variable t))
+  (gdb-create-watcher-from t))
 
 (defun gdb-run (&optional arg break-main)
   "Start execution of the inferior from the beginning.
@@ -1842,6 +1854,20 @@ If ARG is `dprintf' create a dprintf breakpoint instead."
      (when breakpoint-on-point
        (gdb--command (format "-break-delete %d" (gdb--breakpoint-number breakpoint-on-point))
                      (cons 'gdb--context-breakpoint-delete breakpoint-on-point))))))
+
+(defun gdb-registers-change-format ()
+  (interactive)
+  (gdb--with-valid-session
+   (when (gdb--is-buffer-type 'gdb--registers)
+     (let ((thread (gdb--session-selected-thread session))
+           (collection '(("Binary" . "t") ("Decimal" . "d") ("Hexadecimal" . "x")
+                         ("Natural" . "N") ("Octal" . "o") ("Raw" . "r"))))
+       (unless thread (user-error "No thread is selected"))
+       (setf (gdb--thread-registers-format thread) (cdr (assoc (completing-read "Format: " collection nil t)
+                                                               collection)))
+       (gdb--command (concat "-data-list-register-values --skip-unavailable "
+                             (gdb--thread-registers-format thread))
+                     (cons 'gdb--context-registers-update thread) thread)))))
 
 (defun gdb-kill-session ()
   "Kill current GDB session."

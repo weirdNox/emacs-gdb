@@ -456,9 +456,13 @@ static void updateRegisters(emacs_env *Env, mi_result *List, emacs_value Thread)
         mi_result *Tuple = Register->variant.result;
         getBatchResultString(Tuple, GdbKeys, Values, Result_Count);
 
-        emacs_value ListValues[Result_Count];
-        getEmacsStrings(Env, Values, ListValues, Result_Count, false);
-        bufPush(Args, funcall(Env, Cons, Result_Count, ListValues));
+        if(*Values[Result_Value] == '{') {
+            Values[Result_Value] = "<Composite register>";
+        }
+
+        emacs_value ConsValues[Result_Count];
+        getEmacsStrings(Env, Values, ConsValues, Result_Count, false);
+        bufPush(Args, funcall(Env, Cons, Result_Count, ConsValues));
     }
 
     funcall(Env, UpdateRegisters, bufLen(Args), Args);
