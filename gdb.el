@@ -51,7 +51,7 @@ This can also be set to t, which means that all debug components are active.")
     gdb--context-breakpoint-delete ;; Data: Breakpoint
     gdb--context-get-variables ;; Data: Frame
     gdb--context-watcher-create ;; Data: (Expression . WatcherToReplace)
-    gdb--context-watcher-update
+    gdb--context-watcher-update ;; Data: ShouldHighlight
     gdb--context-watcher-list-children
     gdb--context-watcher-change-format ;; Data: Watcher
     gdb--context-registers-list-names ;; Data: Thread
@@ -247,13 +247,13 @@ This is shared among all sessions.")
      (cl-loop for thread in (gdb--session-threads session)
               when (= (gdb--thread-id thread) id) return thread))))
 
-(defun gdb--switch-to-thread (thread)
+(defun gdb--switch-to-thread (thread &optional auto)
   "Unconditionally switch to _different_ THREAD. This will also switch to the most relevant frame.
 THREAD may be nil, which means to remove the selected THREAD."
   (gdb--with-valid-session
    (unless (eq thread (gdb--session-selected-thread session))
      (setf (gdb--session-selected-thread session) thread)
-     (gdb--switch-to-frame (gdb--best-frame-to-switch-to thread))
+     (gdb--switch-to-frame (gdb--best-frame-to-switch-to thread) auto)
 
      (let ((buffer (gdb--get-buffer-with-type session 'gdb--threads)) pos)
        (when buffer
@@ -281,7 +281,7 @@ THREAD may be nil, which means to remove the selected THREAD."
                    when (gdb--frame-file frame) do (setq runner-up frame))
           runner-up fallback))))
 
-(defun gdb--switch-to-frame (frame)
+(defun gdb--switch-to-frame (frame &optional auto)
   "Unconditionally switch to a _different_ FRAME.
 When FRAME is in a different thread, switch to it."
   (gdb--with-valid-session
@@ -289,9 +289,9 @@ When FRAME is in a different thread, switch to it."
      (setf (gdb--session-selected-frame session) frame)
 
      (when frame
-       (gdb--switch-to-thread (gdb--frame-thread frame))
+       (gdb--switch-to-thread (gdb--frame-thread frame) auto)
        (gdb--command (format "-stack-select-frame %d" (gdb--frame-level frame)))
-       (gdb--command "-var-update --all-values *" 'gdb--context-watcher-update frame))
+       (gdb--command "-var-update --all-values *" (cons 'gdb--context-watcher-update auto) frame))
 
      (if (and frame (not (gdb--frame-variables frame)))
          (gdb--command "-stack-list-variables --simple-values" (cons 'gdb--context-get-variables frame) frame)
@@ -340,8 +340,8 @@ When the thread is switched, the current frame will also be changed."
                          (and (eq type 'gdb--frame) (memq 'same-thread cause)
                               (eq thread selected-thread)))))
      (when condition (if frame
-                         (gdb--switch-to-frame frame)
-                       (gdb--switch-to-thread thread))))))
+                         (gdb--switch-to-frame frame t)
+                       (gdb--switch-to-thread thread t))))))
 
 (defun gdb--ask-for-thread (&optional default)
   (gdb--with-valid-session
@@ -1464,7 +1464,7 @@ it from the list."
      (puthash name watcher (gdb--session-watchers session))
      (cl-pushnew 'gdb--watchers (gdb--session-buffer-types-to-update session)))))
 
-(defun gdb--watcher-update-info (&rest args)
+(defun gdb--watchers-update-info (should-highlight &rest args)
   (gdb--with-valid-session
    (let ((tick (1+ (gdb--session-watchers-tick session))))
      (setf (gdb--session-watchers-tick session) tick)
@@ -1480,7 +1480,7 @@ it from the list."
                                (gdb--watcher-children-count watcher) (gdb--stn new-children-count)
                                (gdb--watcher-open watcher) nil))
                        (setf (gdb--watcher-value watcher) value
-                             (gdb--watcher-flag  watcher) tick))
+                             (gdb--watcher-flag  watcher) (and should-highlight tick)))
 
                       ((string= in-scope "false")
                        (setf (gdb--watcher-value watcher) nil
@@ -1613,7 +1613,7 @@ it from the list."
        (gdb--command (format "-var-assign %s %s"
                              (gdb--watcher-name watcher)
                              (gdb--escape-argument (gdb--read-line "Value: " (gdb--watcher-value watcher)))))
-       (gdb--command "-var-update --all-values *" 'gdb--context-watcher-update frame)))))
+       (gdb--command "-var-update --all-values *" (cons 'gdb--context-watcher-update auto) frame)))))
 
 (defun gdb-watcher-edit-expression ()
   (interactive)

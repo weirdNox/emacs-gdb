@@ -67,7 +67,7 @@ u32 plugin_is_GPL_compatible;
         W(BreakpointDeleted, gdb--breakpoint-deleted)       \
         W(AddVariablesToFrame, gdb--add-variables-to-frame) \
         W(NewWatcherInfo, gdb--new-watcher-info)            \
-        W(WatcherUpdateInfo, gdb--watcher-update-info)      \
+        W(WatchersUpdateInfo, gdb--watchers-update-info)      \
         W(WatcherAddChildren, gdb--watcher-add-children)    \
         W(WatcherFormatChange, gdb--watcher-format-change)  \
         W(SetRegisterNames, gdb--set-register-names)        \
@@ -371,8 +371,9 @@ static void watcherCreate(emacs_env *Env, mi_result *Tuple, emacs_value Data) {
     funcall(Env, NewWatcherInfo, arrayCount(Args), Args);
 }
 
-static void watchersUpdate(emacs_env *Env, mi_result *List) {
+static void watchersUpdate(emacs_env *Env, mi_result *List, emacs_value ShouldHighlight) {
     emacs_value *Args = 0;
+    bufPush(Args, ShouldHighlight);
 
 #define resultKeys(W) W(Name, name),            \
         W(Value, value),                        \
@@ -395,7 +396,7 @@ static void watchersUpdate(emacs_env *Env, mi_result *List) {
         bufPush(Args, funcall(Env, ListFunc, Result_Count, ListValues));
     }
 
-    funcall(Env, WatcherUpdateInfo, bufLen(Args), Args);
+    funcall(Env, WatchersUpdateInfo, bufLen(Args), Args);
     bufFree(Args);
 }
 
@@ -753,7 +754,7 @@ static void handleMiResultRecord(emacs_env *Env, mi_result_record *Record, char 
                 } break;
 
                 case Context_WatcherUpdate: {
-                    watchersUpdate(Env, getResultList(Result, "changelist"));
+                    watchersUpdate(Env, getResultList(Result, "changelist"), Context.Data);
                 } break;
 
                 case Context_WatcherListChildren: {
