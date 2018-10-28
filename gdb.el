@@ -399,10 +399,11 @@ All embedded quotes, newlines, and backslashes are preceded with a backslash."
            result))
      (progn ,@body)))
 
-(defsubst gdb--current-line ()
-  "Return an integer of the current line of point in the current buffer."
-  (save-restriction (widen) (save-excursion (beginning-of-line)
-                                            (1+ (count-lines 1 (point))))))
+(defmacro gdb--current-line (&optional pos)
+  "Return current line number. When POS is provided, count lines until POS."
+  `(save-excursion ,(when pos `(goto-char ,pos))
+                   (beginning-of-line)
+                   (1+ (count-lines 1 (point)))))
 
 (defsubst gdb--stn (str) (and (stringp str) (string-to-number str)))
 (defsubst gdb--nts (num) (and (numberp num) (number-to-string num)))
@@ -454,7 +455,7 @@ All embedded quotes, newlines, and backslashes are preceded with a backslash."
 
 ;; ------------------------------------------------------------------------------------------
 ;; Tables
-(cl-defstruct gdb--table header rows (num-rows 0) column-sizes target-line)
+(cl-defstruct gdb--table header rows (num-rows 0) column-sizes target-line start-line)
 (cl-defstruct gdb--table-row table columns properties level has-children)
 
 (defsubst gdb--pad-string (string padding)
@@ -547,8 +548,15 @@ If WITH-HEADER is set, then the first row is used as header."
                                                (gdb--table-row-properties row) (gdb--table-row-level row)
                                                (gdb--table-row-has-children row))))
 
-    (when (gdb--table-target-line table)
-      (gdb--scroll-buffer-to-line (current-buffer) (gdb--table-target-line table)))))
+    (let ((buffer (current-buffer))
+          (start-line  (gdb--table-start-line  table))
+          (target-line (gdb--table-target-line table)))
+      (when start-line
+        (gdb--scroll-buffer-to-last-line buffer)
+        (gdb--scroll-buffer-to-line buffer (+ start-line scroll-margin) t))
+
+      (when target-line
+        (gdb--scroll-buffer-to-line buffer target-line)))))
 
 
 ;; ------------------------------------------------------------------------------------------
@@ -673,7 +681,7 @@ If WITH-HEADER is set, then the first row is used as header."
       (gdb--set-window-buffer bottom-right (gdb--variables-get-buffer session))
       (setf (gdb--session-source-window session) top-left))))
 
-(defun gdb--scroll-buffer-to-line (buffer line)
+(defun gdb--scroll-buffer-to-line (buffer line &optional top)
   (with-current-buffer buffer
     (goto-char (point-min))
     (forward-line (1- line)))
@@ -681,7 +689,8 @@ If WITH-HEADER is set, then the first row is used as header."
   (dolist (window (get-buffer-window-list buffer nil t))
     (with-selected-window window
       (goto-char (point-min))
-      (forward-line (1- line)))))
+      (forward-line (1- line))
+      (when top (recenter 0)))))
 
 (defun gdb--scroll-buffer-to-last-line (buffer)
   (with-current-buffer buffer
@@ -1045,7 +1054,7 @@ stopped thread before running the command. If FORCE-STOPPED is
 
 
 ;; ------------------------------------------------------------------------------------------
-;; Watcher buffer
+;; Watchers buffer
 (defvar gdb-watchers-mode-map
   (let ((map (make-sparse-keymap)))
     (define-key map (kbd        "p") #'previous-line)
@@ -1069,7 +1078,7 @@ stopped thread before running the command. If FORCE-STOPPED is
 (gdb--simple-get-buffer gdb--watchers gdb--watchers-update "Watchers" nil
   (gdb-watchers-mode))
 
-(defun gdb--watcher-draw (table-or-parent watcher tick watcher-under-cursor)
+(defun gdb--watcher-draw (table-or-parent watcher tick watcher-at-start watcher-under-cursor)
   (let* ((out-of-scope (eq (gdb--watcher-flag watcher) 'out-of-scope))
          (row (gdb--table-add-row
                table-or-parent
@@ -1083,23 +1092,33 @@ stopped thread before running the command. If FORCE-STOPPED is
                (and (not out-of-scope) (> (gdb--watcher-children-count watcher) 0))))
          (children (gdb--watcher-children watcher)))
 
+    (when (eq watcher watcher-at-start)
+      (let ((table (gdb--get-table-from-table-or-parent table-or-parent)))
+        (setf (gdb--table-start-line table) (gdb--table-num-rows table))))
+
     (when (eq watcher watcher-under-cursor)
       (let ((table (gdb--get-table-from-table-or-parent table-or-parent)))
         (setf (gdb--table-target-line table) (gdb--table-num-rows table))))
 
     (when (and (not out-of-scope) (gdb--watcher-open watcher))
       (cl-loop for child in children
-               do (gdb--watcher-draw row child tick watcher-under-cursor)))))
+               do (gdb--watcher-draw row child tick watcher-at-start watcher-under-cursor)))))
 
 (defun gdb--watchers-update ()
   (gdb--with-valid-session
-   (let ((table (make-gdb--table :target-line (gdb--current-line))))
+   (let* ((window-start (window-start (get-buffer-window nil t)))
+          (table (make-gdb--table :start-line  (gdb--current-line window-start)
+                                  :target-line (gdb--current-line))))
+
      (gdb--table-add-header table '("Expr" "Type" "Value"))
-     (let ((watcher-under-cursor (get-text-property (line-beginning-position) 'gdb--watcher))
+
+     (let ((watcher-at-start     (get-text-property window-start              'gdb--watcher))
+           (watcher-under-cursor (get-text-property (line-beginning-position) 'gdb--watcher))
            (tick (gdb--session-watchers-tick session)))
        (cl-loop for watcher in (gdb--session-root-watchers session)
-                do (gdb--watcher-draw table watcher tick watcher-under-cursor))
-       (gdb--table-insert table)))))
+                do (gdb--watcher-draw table watcher tick watcher-at-start watcher-under-cursor)))
+
+     (gdb--table-insert table))))
 
 (defun gdb--watchers-remove-records (session list)
   "Removes every reference to the watchers in LIST and their children."
