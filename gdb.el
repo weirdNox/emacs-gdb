@@ -81,9 +81,11 @@ dynamic module.")
 (defconst gdb--keep-buffer-types '(gdb--comint gdb--inferior-io)
   "List of buffer types that should be kept after GDB is killed.")
 
+(cl-defstruct gdb--register number name value tick)
+
 (cl-defstruct gdb--thread
   id target-id name state frames core
-  (registers-tick most-negative-fixnum) (registers (make-hash-table :size 250)) (registers-format "N"))
+  (registers-tick most-negative-fixnum) registers (registers-format "N"))
 
 (cl-defstruct gdb--frame thread level addr func file line from variables)
 
@@ -101,7 +103,6 @@ breakpoint of TYPE.")
 
 (cl-defstruct gdb--variable name type value)
 (cl-defstruct gdb--watcher  name expr type value thread parent children-count children open flag)
-(cl-defstruct gdb--register number name value tick)
 
 (cl-defstruct gdb--session
   frame process buffers source-window debuggee-path debuggee-args
@@ -1093,7 +1094,7 @@ stopped thread before running the command. If FORCE-STOPPED is
 (defun gdb--watchers-update ()
   (gdb--with-valid-session
    (let ((table (make-gdb--table :target-line (gdb--current-line))))
-     (gdb--table-add-header table '("" "Type" "Value"))
+     (gdb--table-add-header table '("Expr" "Type" "Value"))
      (let ((watcher-under-cursor (get-text-property (line-beginning-position) 'gdb--watcher))
            (tick (gdb--session-watchers-tick session)))
        (cl-loop for watcher in (gdb--session-root-watchers session)
@@ -1146,14 +1147,15 @@ stopped thread before running the command. If FORCE-STOPPED is
      (gdb--table-add-header table '("Name" "Value"))
      (when thread
        (cl-loop with tick = (gdb--thread-registers-tick thread)
-                for reg being the hash-values of (gdb--thread-registers thread)
-                for reg-tick = (gdb--register-tick reg)
-                do (gdb--table-add-row
-                    table (list (propertize (gdb--register-name  reg) 'face 'font-lock-variable-name-face)
-                                (gdb--add-face (gdb--register-value reg)
-                                               (when (and reg-tick (= tick reg-tick))
-                                                 'error)))
-                    (list 'gdb--register reg))))
+                for  reg across (gdb--thread-registers thread)
+                for  reg-tick = (and reg (gdb--register-tick reg))
+                when reg
+                do   (gdb--table-add-row
+                      table (list (propertize (gdb--register-name  reg) 'face 'font-lock-variable-name-face)
+                                  (gdb--add-face (gdb--register-value reg)
+                                                 (when (and reg-tick (= tick reg-tick))
+                                                   'error)))
+                      (list 'gdb--register reg))))
      (gdb--table-insert table))))
 
 ;; ------------------------------------------------------------------------------------------
@@ -1485,13 +1487,15 @@ it from the list."
    (setf (gdb--watcher-value watcher) new-value)
    (cl-pushnew 'gdb--watchers (gdb--session-buffer-types-to-update session))))
 
-(defun gdb--set-register-names (thread &rest names)
+(defun gdb--set-register-names (thread count &rest names)
   (gdb--with-valid-session
+   (setf (gdb--thread-registers thread) (make-vector count nil))
+
    (let ((registers (gdb--thread-registers thread)))
      (cl-loop for name in names
               for num from 0
               unless (string= name "")
-              do (puthash num (make-gdb--register :number num :name name) registers)))))
+              do (setf (aref registers num) (make-gdb--register :number num :name name))))))
 
 (defun gdb--update-registers (thread &rest pairs)
   (gdb--with-valid-session
@@ -1499,8 +1503,8 @@ it from the list."
          (tick (1+  (gdb--thread-registers-tick thread))))
      (setf (gdb--thread-registers-tick thread) tick)
      (cl-loop for (num-str . value) in pairs
-              for num = (string-to-number num-str)
-              for reg = (gethash num registers)
+              for  num = (string-to-number num-str)
+              for  reg = (aref registers num)
               when reg do (setf (gdb--register-value reg) value
                                 (gdb--register-tick  reg) tick))
      (cl-pushnew 'gdb--registers (gdb--session-buffer-types-to-update session)))))

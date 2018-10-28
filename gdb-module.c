@@ -432,6 +432,12 @@ static void setRegisterNames(emacs_env *Env, mi_result *List, emacs_value Thread
     emacs_value *Args = 0;
     bufPush(Args, Thread);
 
+    int Count = 0;
+    for(mi_result *Element = List; Element; Element = Element->next) {
+        ++Count;
+    }
+    bufPush(Args, Env->make_integer(Env, Count));
+
     for(mi_result *Element = List; Element; Element = Element->next) {
         bufPush(Args, getEmacsString(Env, Element->variant.cstring));
     }
