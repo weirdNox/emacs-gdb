@@ -456,7 +456,10 @@ All embedded quotes, newlines, and backslashes are preceded with a backslash."
 (cl-defstruct gdb--table header rows (num-rows 0) column-sizes target-line)
 (cl-defstruct gdb--table-row table columns properties level has-children)
 
-(defsubst gdb--pad-string (string padding) (format (concat "%" (number-to-string padding) "s") (or string "")))
+(defsubst gdb--pad-string (string padding)
+  (if (= padding 0)
+      string
+    (format (concat "%" (number-to-string padding) "s") (or string ""))))
 
 (defun gdb--table-update-column-sizes (table columns &optional level has-children)
   "Update TABLE column sizes to include new COLUMNS.
@@ -465,12 +468,16 @@ LEVEL should be an integer specifying the indentation level."
     (setf (gdb--table-column-sizes table) (make-list (length columns) 0)))
 
   (setf (gdb--table-column-sizes table)
-        (cl-loop for string in columns
-                 and size in (gdb--table-column-sizes table)
-                 and first = t then nil
-                 collect (- (max (abs size) (+ (string-width (or string ""))
-                                               (* (or (and first level) 0) 4)
-                                               (or (and first has-children 4) 0)))))))
+        (cl-loop
+         with len = (length (gdb--table-column-sizes table))
+         for string in columns
+         and size in (gdb--table-column-sizes table)
+         and first = t then nil
+         and count from 1
+         when (= count len) collect 0
+         else collect (- (max (abs size) (+ (string-width (or string ""))
+                                            (* (or (and first level) 0) 4)
+                                            (or (and first has-children 4) 0)))))))
 
 (defun gdb--table-add-header (table columns)
   "Set TABLE header to COLUMNS, a list of strings, and recalculate column sizes."
@@ -506,18 +513,19 @@ HAS-CHILDREN should be t when this node has children."
     row))
 
 (defun gdb--table-row-string (columns column-sizes sep &optional with-newline properties level has-children)
-  (apply #'propertize (cl-loop for string in columns
-                               and size   in column-sizes
-                               and first = t then nil
-                               unless first concat sep into result
-                               concat (gdb--pad-string
-                                       (concat (and first (make-string (* (or level 0) 4) ? ))
-                                               (and first (cond ((eq has-children t)     "[+] ")
-                                                                ((eq has-children 'open) "[-] ")))
-                                               string)
-                                       size)
-                               into result
-                               finally return (concat result (and with-newline "\n")))
+  (apply #'propertize (cl-loop
+                       for string in columns
+                       and size   in column-sizes
+                       and first = t then nil
+                       unless first concat sep into result
+                       concat (gdb--pad-string
+                               (concat (and first (make-string (* (or level 0) 4) ? ))
+                                       (and first (cond ((eq has-children t)     "[+] ")
+                                                        ((eq has-children 'open) "[-] ")))
+                                       string)
+                               size)
+                       into result
+                       finally return (concat result (and with-newline "\n")))
          properties))
 
 (defun gdb--table-insert (table &optional sep)
