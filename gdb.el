@@ -444,11 +444,12 @@ All embedded quotes, newlines, and backslashes are preceded with a backslash."
         (dolist (window windows-to-move)
           (set-window-point window (point-max)))))))
 
-(defun gdb--get-data (command key)
-  "Synchronously retrieve result KEY of COMMAND."
+(defun gdb--get-data (command key &rest args-to-command)
+  "Synchronously retrieve result KEY of COMMAND.
+ARGS-TO-COMMAND are passed to `gdb--command', after the context."
   (gdb--with-valid-session
    (setq gdb--data nil)
-   (gdb--command command (cons 'gdb--context-get-data key))
+   (apply 'gdb--command command (cons 'gdb--context-get-data key) args-to-command)
    (while (not gdb--data) (accept-process-output (gdb--session-process session) 0.5))
    (when (stringp gdb--data) gdb--data)))
 
@@ -1558,6 +1559,7 @@ it from the list."
             (define-key map (kbd  "<S-f5>") #'gdb-kill)
             (define-key map (kbd    "<f6>") #'gdb-stop)
             (define-key map (kbd    "<f8>") #'gdb-watcher-add-expression)
+            (define-key map (kbd  "<C-f8>") #'gdb-eval-expression)
             (define-key map (kbd    "<f9>") #'gdb-toggle-breakpoint)
             (define-key map (kbd   "<f10>") #'gdb-next)
             (define-key map (kbd "<M-f10>") #'gdb-next-instruction)
@@ -1683,6 +1685,16 @@ it from the list."
 (defun gdb-create-watcher-from-ask ()
   (interactive)
   (gdb-create-watcher-from t))
+
+(defun gdb-eval-expression ()
+  (interactive)
+  (gdb--with-valid-session
+   (let* ((frame (or (gdb--session-selected-frame session) (user-error "No frame is selected")))
+          (expression (gdb--read-line "Expression to evaluate: ")))
+     (when expression
+       (message "Result: %s"
+                (gdb--get-data (concat "-data-evaluate-expression " (gdb--escape-argument expression))
+                               "value" frame))))))
 
 (defun gdb-run (&optional arg break-main)
   "Start execution of the inferior from the beginning.
