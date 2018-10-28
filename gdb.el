@@ -416,14 +416,14 @@ All embedded quotes, newlines, and backslashes are preceded with a backslash."
 
 (defun gdb--location-string (&optional func file line from addr)
   (when file (setq file (file-name-nondirectory file)))
-  (concat "in " (propertize (or func "??") 'font-lock-face font-lock-function-name-face)
-          (and addr (concat " at " addr))
+  (concat "in " (propertize (or func "??") 'face font-lock-function-name-face)
+          (and addr (concat " at " (propertize addr 'face 'font-lock-constant-face)))
           (or (and file line (format " of %s:%d" file line))
               (and from (concat " of " from)))))
 
 (defun gdb--frame-location-string (frame &optional for-threads-view)
   (cond (frame (gdb--location-string (gdb--frame-func frame) (gdb--frame-file frame) (gdb--frame-line frame)
-                                     (gdb--frame-from frame) (and for-threads-view (gdb--frame-addr frame))))
+                                     (gdb--frame-from frame) (and for-threads-view   (gdb--frame-addr frame))))
         (t "No information")))
 
 (defun gdb--append-to-buffer (buffer string)
@@ -900,7 +900,8 @@ stopped thread before running the command. If FORCE-STOPPED is
 
 (define-derived-mode gdb-threads-mode nil "GDB Threads"
   (setq-local buffer-read-only t)
-  (buffer-disable-undo))
+  (buffer-disable-undo)
+  (font-lock-mode -1))
 
 (gdb--simple-get-buffer gdb--threads gdb--threads-update "Threads" nil
   (gdb-threads-mode))
@@ -919,8 +920,8 @@ stopped thread before running the command. If FORCE-STOPPED is
              (name (gdb--thread-name thread))
              (state-display
               (if (string= (gdb--thread-state thread) "running")
-                  (eval-when-compile (propertize "running" 'font-lock-face font-lock-string-face))
-                (eval-when-compile (propertize "stopped" 'font-lock-face font-lock-warning-face))))
+                  (eval-when-compile (propertize "running" 'face font-lock-string-face))
+                (eval-when-compile (propertize "stopped" 'face font-lock-warning-face))))
              (core (gdb--thread-core thread))
              (frame-str (gdb--frame-location-string (car (gdb--thread-frames thread)) t)))
          (gdb--table-add-row table (list id-str target-id name state-display core frame-str)
@@ -947,7 +948,8 @@ stopped thread before running the command. If FORCE-STOPPED is
 
 (define-derived-mode gdb-frames-mode nil "GDB Frames"
   (setq-local buffer-read-only t)
-  (buffer-disable-undo))
+  (buffer-disable-undo)
+  (font-lock-mode -1))
 
 (gdb--simple-get-buffer gdb--frames gdb--frames-update "Stack Frames" nil
   (gdb-frames-mode))
@@ -963,7 +965,7 @@ stopped thread before running the command. If FORCE-STOPPED is
      (gdb--table-add-header table '("Level" "Address" "Where"))
      (dolist (frame frames)
        (let ((level-str (number-to-string (gdb--frame-level frame)))
-             (addr (gdb--frame-addr frame))
+             (addr (gdb--add-face (gdb--frame-addr frame) 'font-lock-constant-face))
              (where (gdb--frame-location-string frame)))
          (gdb--table-add-row table (list level-str addr where) (list 'gdb--frame frame))
 
@@ -989,7 +991,8 @@ stopped thread before running the command. If FORCE-STOPPED is
 
 (define-derived-mode gdb-breakpoints-mode nil "GDB Breakpoints"
   (setq-local buffer-read-only t)
-  (buffer-disable-undo))
+  (buffer-disable-undo)
+  (font-lock-mode -1))
 
 (gdb--simple-get-buffer gdb--breakpoints gdb--breakpoints-update "Breakpoints" nil
   (gdb-breakpoints-mode))
@@ -1002,15 +1005,17 @@ stopped thread before running the command. If FORCE-STOPPED is
      (gdb--table-add-header table '("Num" "Type" "Disp" "Enb" "Addr" "Hits" "Ign" "What"))
      (dolist (breakpoint breakpoints)
        (let ((enabled-disp (if (gdb--breakpoint-enabled breakpoint)
-                               (eval-when-compile (propertize "y" 'font-lock-face font-lock-warning-face))
-                             (eval-when-compile (propertize "n" 'font-lock-face font-lock-comment-face)))))
+                               (eval-when-compile (propertize "y" 'face font-lock-warning-face))
+                             (eval-when-compile (propertize "n" 'face font-lock-comment-face)))))
 
          (gdb--table-add-row table (list (number-to-string (gdb--breakpoint-number breakpoint))
-                                         (gdb--breakpoint-type   breakpoint) (gdb--breakpoint-disp   breakpoint)
-                                         enabled-disp                        (gdb--breakpoint-addr   breakpoint)
-                                         (gdb--breakpoint-hits   breakpoint)
+                                         (gdb--breakpoint-type breakpoint)
+                                         (gdb--breakpoint-disp breakpoint)
+                                         enabled-disp
+                                         (gdb--add-face (gdb--breakpoint-addr breakpoint) 'font-lock-constant-face)
+                                         (gdb--breakpoint-hits breakpoint)
                                          (gdb--nts (gdb--breakpoint-ignore-count breakpoint))
-                                         (gdb--breakpoint-what   breakpoint))
+                                         (gdb--breakpoint-what breakpoint))
                              `(gdb--breakpoint ,breakpoint))
 
          (when (eq cursor-on-breakpoint breakpoint)
@@ -1033,7 +1038,8 @@ stopped thread before running the command. If FORCE-STOPPED is
 
 (define-derived-mode gdb-variables-mode nil "GDB Variables"
   (setq-local buffer-read-only t)
-  (buffer-disable-undo))
+  (buffer-disable-undo)
+  (font-lock-mode -1))
 
 (gdb--simple-get-buffer gdb--variables gdb--variables-update "Variables" nil
   (gdb-variables-mode))
@@ -1073,7 +1079,8 @@ stopped thread before running the command. If FORCE-STOPPED is
 
 (define-derived-mode gdb-watchers-mode nil "GDB Watchers"
   (setq-local buffer-read-only t)
-  (buffer-disable-undo))
+  (buffer-disable-undo)
+  (font-lock-mode -1))
 
 (gdb--simple-get-buffer gdb--watchers gdb--watchers-update "Watchers" nil
   (gdb-watchers-mode))
@@ -1154,7 +1161,8 @@ stopped thread before running the command. If FORCE-STOPPED is
 
 (define-derived-mode gdb-registers-mode nil "GDB Registers"
   (setq-local buffer-read-only t)
-  (buffer-disable-undo))
+  (buffer-disable-undo)
+  (font-lock-mode -1))
 
 (gdb--simple-get-buffer gdb--registers gdb--registers-update "Registers" nil
   (gdb-registers-mode))
@@ -1359,7 +1367,6 @@ it from the list."
       ((string= "stopped" state)
        ;; NOTE(nox): Don't update right now, because it will update when the frame list arrives
        (gdb--command "-stack-list-frames" (cons 'gdb--context-frame-info thread) thread)
-       (gdb--command "-var-update --all-values *" 'gdb--context-watcher-update thread)
 
        (cond ((= (gdb--thread-registers-tick thread) most-negative-fixnum)
               (gdb--command "-data-list-changed-registers" nil thread) ;; NOTE(nox): Ignored
