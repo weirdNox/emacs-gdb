@@ -199,14 +199,22 @@ This is shared among all sessions.")
       (remove-hook 'delete-frame-functions #'gdb--handle-delete-frame)
       (gdb-keys-mode -1))
 
+    (unless (cl-loop for frame in (frame-list)
+                     when (and (not (eq (frame-parameter frame 'gdb--session) session))
+                               (frame-visible-p frame) (not (frame-parent frame))
+                               (not (frame-parameter frame 'delete-before)))
+                     return t)
+      (save-buffers-kill-emacs)
+      (make-frame))
+
     (cl-loop for frame in (frame-list)
-             when (eq (frame-parameter frame 'gdb--session) session)
-             do (unless (eq frame (gdb--session-frame session))
-                  (delete-frame frame)))
+             when (and (eq (frame-parameter frame 'gdb--session) session)
+                       (not (eq frame (gdb--session-frame session))))
+             do (delete-frame frame))
 
     (when (frame-live-p (gdb--session-frame session))
       (set-frame-parameter (gdb--session-frame session) 'gdb--session nil)
-      (when (> (length (frame-list)) 0) (delete-frame (gdb--session-frame session))))
+      (delete-frame (gdb--session-frame session)))
 
     (set-process-sentinel (gdb--session-process session) nil)
     (delete-process (gdb--session-process session))
@@ -281,6 +289,7 @@ When FRAME is in a different thread, switch to it."
 
      (when frame
        (gdb--switch-to-thread (gdb--frame-thread frame))
+       (gdb--command (format "-stack-select-frame %d" (gdb--frame-level frame)))
        (gdb--command "-var-update --all-values *" 'gdb--context-watcher-update frame))
 
      (if (and frame (not (gdb--frame-variables frame)))
