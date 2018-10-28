@@ -1091,6 +1091,16 @@ stopped thread before running the command. If FORCE-STOPPED is
            unless (gdb--watcher-parent watcher) do (setf (gdb--session-root-watchers session)
                                                          (delq watcher (gdb--session-root-watchers session)))))
 
+(defsubst gdb--watcher-change-format (watcher format)
+  (gdb--command (format "-var-set-format %s %s" (gdb--watcher-name watcher) format)
+                (cons 'gdb--context-watcher-change-format watcher)))
+
+(defun gdb--watcher-change-format-recursively (list format)
+  (cl-loop for watcher in list
+           do
+           (gdb--watcher-change-format watcher format)
+           (gdb--watcher-change-format-recursively (gdb--watcher-children watcher) format)))
+
 
 ;; ------------------------------------------------------------------------------------------
 ;; Registers buffer
@@ -1577,17 +1587,20 @@ it from the list."
        (gdb-watcher-add-expression (gdb--get-data (concat "-var-info-path-expression " (gdb--watcher-name watcher))
                                                   "path_expr"))))))
 
-(defun gdb-watcher-change-format ()
-  (interactive)
+(defun gdb-watcher-change-format (arg)
+  "Change format of the watcher under cursor. When ARG is non-nil, also recursively change children's format."
+  (interactive "P")
   (gdb--with-valid-session
    (when (gdb--is-buffer-type 'gdb--watchers)
-     (let ((watcher (get-text-property (line-beginning-position) 'gdb--watcher)))
+     (let ((watcher (get-text-property (line-beginning-position) 'gdb--watcher))
+           format)
        (unless watcher (user-error "No watcher under cursor"))
-       (gdb--command (format "-var-set-format %s %s" (gdb--watcher-name watcher)
-                             (downcase (completing-read "Format: " '("Natural" "Binary" "Octal" "Decimal"
-                                                                     "Hexadecimal" "Zero-Hexadecimal")
-                                                        nil t)))
-                     (cons 'gdb--context-watcher-change-format watcher))))))
+       (setq format (downcase (completing-read "Format: " '("Natural" "Binary" "Octal" "Decimal"
+                                                            "Hexadecimal" "Zero-Hexadecimal")
+                                               nil t)))
+       (if arg
+           (gdb--watcher-change-format-recursively (list watcher) format)
+         (gdb--watcher-change-format watcher format))))))
 
 (defun gdb-watcher-delete ()
   (interactive)
