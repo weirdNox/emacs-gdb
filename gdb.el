@@ -54,6 +54,9 @@ This can also be set to t, which means that all debug components are active.")
     gdb--context-watcher-update
     gdb--context-watcher-list-children
     gdb--context-watcher-change-format ;; Data: Watcher
+    gdb--context-registers-list-names ;; Data: Thread
+    gdb--context-registers-get-changed ;; Data: (FormatString . Thread)
+    gdb--context-registers-update ;; Data: Thread
     gdb--context-disassemble ;; Data: Disassemble buffer
     gdb--context-persist-thread
     gdb--context-get-data ;; Data: Result name string
@@ -71,14 +74,17 @@ dynamic module.")
       gdb--breakpoints
       gdb--variables
       gdb--watchers
-      gdb--disassembly
-      gdb--registers)
+      gdb--registers
+      gdb--disassembly)
     "List of available buffer types."))
 
 (defconst gdb--keep-buffer-types '(gdb--comint gdb--inferior-io)
   "List of buffer types that should be kept after GDB is killed.")
 
-(cl-defstruct gdb--thread id target-id name state frames core)
+(cl-defstruct gdb--thread
+  id target-id name state frames core
+  (registers-tick most-negative-fixnum) (registers (make-hash-table :size 250)))
+
 (cl-defstruct gdb--frame thread level addr func file line from variables)
 
 (cl-defstruct gdb--breakpoint
@@ -95,13 +101,14 @@ breakpoint of TYPE.")
 
 (cl-defstruct gdb--variable name type value)
 (cl-defstruct gdb--watcher  name expr type value thread parent children-count children open flag)
+(cl-defstruct gdb--register number name value tick)
 
 (cl-defstruct gdb--session
   frame process buffers source-window debuggee-path debuggee-args
   buffer-types-to-update buffers-to-update
   threads selected-thread persist-thread selected-frame
   breakpoints
-  (watchers-tick most-negative-fixnum) watchers root-watchers)
+  (watchers-tick most-negative-fixnum) (watchers (make-hash-table :test 'equal)) root-watchers)
 (defvar gdb--sessions nil
   "List of active sessions.")
 
@@ -252,7 +259,8 @@ THREAD may be nil, which means to remove the selected THREAD."
        (gdb--command (format "-thread-select %d" (gdb--thread-id thread)))
        (message "Switched to thread %d." (gdb--thread-id thread)))
 
-     (cl-pushnew 'gdb--frames (gdb--session-buffer-types-to-update session)))))
+     (cl-pushnew 'gdb--frames    (gdb--session-buffer-types-to-update session))
+     (cl-pushnew 'gdb--registers (gdb--session-buffer-types-to-update session)))))
 
 (defun gdb--best-frame-to-switch-to (thread)
   "Return the most relevant frame to switch to in THREAD's frames."
@@ -1040,7 +1048,7 @@ stopped thread before running the command. If FORCE-STOPPED is
   (setq-local buffer-read-only t)
   (buffer-disable-undo))
 
-(gdb--simple-get-buffer gdb--watchers gdb--watchers-update "Watcher" nil
+(gdb--simple-get-buffer gdb--watchers gdb--watchers-update "Watchers" nil
   (gdb-watchers-mode))
 
 (defun gdb--watcher-draw (table-or-parent watcher tick watcher-under-cursor)
@@ -1083,6 +1091,43 @@ stopped thread before running the command. If FORCE-STOPPED is
            unless (gdb--watcher-parent watcher) do (setf (gdb--session-root-watchers session)
                                                          (delq watcher (gdb--session-root-watchers session)))))
 
+
+;; ------------------------------------------------------------------------------------------
+;; Registers buffer
+(defvar gdb-registers-mode-map
+  (let ((map (make-sparse-keymap)))
+    (define-key map (kbd          "p") #'previous-line)
+    (define-key map (kbd          "n") #'next-line)
+    ;; TODO(nox): Create the analogous commands or change these
+    ;; (define-key map (kbd        "RET") #'gdb-create-watcher-from-variable)
+    ;; (define-key map (kbd   "<return>") #'gdb-create-watcher-from-variable)
+    ;; (define-key map (kbd      "S-RET") #'gdb-create-watcher-from-variable-ask)
+    ;; (define-key map (kbd "<S-return>") #'gdb-create-watcher-from-variable-ask)
+    map))
+
+(define-derived-mode gdb-registers-mode nil "GDB Registers"
+  (setq-local buffer-read-only t)
+  (buffer-disable-undo))
+
+(gdb--simple-get-buffer gdb--registers gdb--registers-update "Registers" nil
+  (gdb-watchers-mode))
+
+(defun gdb--registers-update ()
+  (gdb--with-valid-session
+   (let ((table (make-gdb--table :target-line (gdb--current-line)))
+         (thread (gdb--session-selected-thread session)))
+     (gdb--table-add-header table '("Name" "Value"))
+     (when thread
+       (cl-loop with tick = (gdb--thread-registers-tick thread)
+                for reg being the hash-values of (gdb--thread-registers thread)
+                for reg-tick = (gdb--register-tick reg)
+                do (gdb--table-add-row
+                    table (list (propertize (gdb--register-name  reg) 'face 'font-lock-variable-name-face)
+                                (gdb--add-face (gdb--register-value reg)
+                                               (when (and reg-tick (= tick reg-tick))
+                                                 'error)))
+                    (list 'gdb--register reg))))
+     (gdb--table-insert table))))
 
 ;; ------------------------------------------------------------------------------------------
 ;; Source buffers
@@ -1259,13 +1304,23 @@ it from the list."
        (id id) (target-id target-id) (name name) (state state) (core core))
 
      (unless existing-thread
+       (gdb--command "-data-list-register-names" (cons 'gdb--context-registers-list-names thread))
        (setf (gdb--session-threads session) (append (gdb--session-threads session) (list thread))))
 
      (cond
       ((string= "stopped" state)
        ;; NOTE(nox): Don't update right now, because it will update when the frame list arrives
        (gdb--command "-stack-list-frames" (cons 'gdb--context-frame-info thread) thread)
-       (gdb--command "-var-update --all-values *" 'gdb--context-watcher-update thread))
+       (gdb--command "-var-update --all-values *" 'gdb--context-watcher-update thread)
+
+       ;; TODO(): FORMATS!!!!!
+       (cond ((= (gdb--thread-registers-tick thread) most-negative-fixnum)
+              (gdb--command "-data-list-changed-registers" nil thread) ;; NOTE(nox): Ignored
+              (gdb--command "-data-list-register-values --skip-unavailable x"
+                            (cons 'gdb--context-registers-update thread) thread))
+             (t
+              (gdb--command "-data-list-changed-registers"
+                            (cons 'gdb--context-registers-get-changed (cons "x" thread)) thread))))
 
       (t
        (cl-pushnew 'gdb--threads (gdb--session-buffer-types-to-update session))
@@ -1402,6 +1457,26 @@ it from the list."
    (setf (gdb--watcher-value watcher) new-value)
    (cl-pushnew 'gdb--watchers (gdb--session-buffer-types-to-update session))))
 
+(defun gdb--set-register-names (thread &rest names)
+  (gdb--with-valid-session
+   (let ((registers (gdb--thread-registers thread)))
+     (cl-loop for name in names
+              for num from 0
+              unless (string= name "")
+              do (puthash num (make-gdb--register :number num :name name) registers)))))
+
+(defun gdb--update-registers (thread &rest pairs)
+  (gdb--with-valid-session
+   (let ((registers (gdb--thread-registers      thread))
+         (tick (1+  (gdb--thread-registers-tick thread))))
+     (setf (gdb--thread-registers-tick thread) tick)
+     (cl-loop for (num-str . value) in pairs
+              for num = (string-to-number num-str)
+              for reg = (gethash num registers)
+              when reg do (setf (gdb--register-value reg) value
+                                (gdb--register-tick  reg) tick))
+     (cl-pushnew 'gdb--registers (gdb--session-buffer-types-to-update session)))))
+
 ;; (defun gdb--set-disassembly (buffer list with-source-info)
 ;;   (when (buffer-live-p buffer)
 ;;     (with-current-buffer buffer
@@ -1420,9 +1495,10 @@ it from the list."
   "This mode enables global keybindings to interact with GDB."
   :global t
   :keymap (let ((map (make-sparse-keymap)))
-            (define-key map (kbd    "<f5>")   #'gdb-run-or-continue)
+            (define-key map (kbd    "<f5>") #'gdb-run-or-continue)
             (define-key map (kbd  "<C-f5>") #'gdb-start)
             (define-key map (kbd  "<S-f5>") #'gdb-kill)
+            (define-key map (kbd    "<f6>") #'gdb-stop)
             (define-key map (kbd    "<f8>") #'gdb-watcher-add-expression)
             (define-key map (kbd    "<f9>") #'gdb-toggle-breakpoint)
             (define-key map (kbd   "<f10>") #'gdb-next)
@@ -1673,13 +1749,17 @@ If ADVANCE is nil, then only run until code inside the same frame."
 
 (defun gdb--switch-buffer (buffer-fun)
   (gdb--with-valid-session
-   (let ((buffer (funcall buffer-fun session)))
-     (when gdb--open-buffer-new-frame (x-focus-frame (make-frame `((gdb--session . ,session)
-                                                                   (name . ,(gdb--frame-name session))
-                                                                   (unsplittable . t)))))
-     (when (eq (selected-window) (gdb--session-source-window session))
-       (setf (gdb--session-source-window session) nil))
-     (gdb--set-window-buffer (selected-window) buffer))))
+   (let ((buffer (funcall buffer-fun session))
+         (window (selected-window)))
+     (if gdb--open-buffer-new-frame
+         (let ((frame (make-frame `((gdb--session . ,session)
+                                    (name . ,(gdb--frame-name session))
+                                    (unsplittable . t)))))
+           (x-focus-frame frame)
+           (setq window (frame-first-window frame)))
+       (when (eq window (gdb--session-source-window session))
+         (setf (gdb--session-source-window session) nil)))
+     (gdb--set-window-buffer window buffer))))
 
 (defhydra gdb-switch-buffer
   (:hint nil :foreign-keys warn :exit t :body-pre (gdb--with-valid-session
@@ -1687,8 +1767,8 @@ If ADVANCE is nil, then only run until code inside the same frame."
                                                    (setq gdb--open-buffer-new-frame nil)))
   "
 Show GDB buffer in %s(if gdb--open-buffer-new-frame \"new frame\" \"selected window\") [_<f12>_]
-_g_db shell     |  _t_hreads  |  _b_reakpoints  |  _v_ariables  |  _s_ource buffer
-_i_nferior i/o  |  _f_rames   |  ^ ^            |  _w_atcher    |
+_g_db shell     |  _t_hreads  |  _b_reakpoints  |  _v_ariables  |  _r_egisters | _s_ource buffer
+_i_nferior i/o  |  _f_rames   |  ^ ^            |  _w_atcher    |  ^ ^         |
 "
   ("g" (gdb--switch-buffer 'gdb--comint-get-buffer))
   ("i" (gdb--switch-buffer 'gdb--inferior-io-get-buffer))
@@ -1696,7 +1776,8 @@ _i_nferior i/o  |  _f_rames   |  ^ ^            |  _w_atcher    |
   ("f" (gdb--switch-buffer 'gdb--frames-get-buffer))
   ("b" (gdb--switch-buffer 'gdb--breakpoints-get-buffer))
   ("v" (gdb--switch-buffer 'gdb--variables-get-buffer))
-  ("w" (gdb--switch-buffer 'gdb--watcher-get-buffer))
+  ("w" (gdb--switch-buffer 'gdb--watchers-get-buffer))
+  ("r" (gdb--switch-buffer 'gdb--registers-get-buffer))
   ("s" (progn (setf (gdb--session-source-window (gdb--infer-session))
                     (unless gdb--open-buffer-new-frame (selected-window)))
               (gdb--display-source-buffer)))
@@ -1770,7 +1851,7 @@ If ARG is `dprintf' create a dprintf breakpoint instead."
 ;;;###autoload
 (defun gdb-create-session ()
   (interactive)
-  (let* ((session (make-gdb--session :watchers (make-hash-table :test 'equal)))
+  (let* ((session (make-gdb--session))
          (frame (gdb--create-frame session)))
     (push session gdb--sessions)
 

@@ -46,9 +46,13 @@ u32 plugin_is_GPL_compatible;
 
 #define internWriter(W) W(Nil, nil)                         \
         W(T, t)                                             \
+        W(Cons, cons)                                       \
+        W(Car, car)                                         \
+        W(Cdr, cdr)                                         \
         W(ListFunc, list)                                   \
         W(DeleteProcess, delete-process)                    \
                                                             \
+        W(GdbCmd, gdb--command)                             \
         W(ExtractContext, gdb--extract-context)             \
         W(SetData, gdb--set-data)                           \
         W(LogError, gdb--log-error)                         \
@@ -66,6 +70,8 @@ u32 plugin_is_GPL_compatible;
         W(WatcherUpdateInfo, gdb--watcher-update-info)      \
         W(WatcherAddChildren, gdb--watcher-add-children)    \
         W(WatcherFormatChange, gdb--watcher-format-change)  \
+        W(SetRegisterNames, gdb--set-register-names)        \
+        W(UpdateRegisters, gdb--update-registers)           \
         W(SetDisassembly, gdb--set-disassembly)             \
         W(MakeInstruction, make-gdb--instruction)           \
         W(MakeSourceInfo, make-gdb--source-instr-info)      \
@@ -304,14 +310,14 @@ static void frameInfo(emacs_env *Env, mi_result *List, emacs_value Thread) {
         W(Line, line),                          \
         W(From, from)
 
-    gdbNamesWriter(GdbNames, resultKeys);
+    gdbNamesWriter(GdbKeys, resultKeys);
     enumWriter(resultKeys);
 #undef resultKeys
 
     for(mi_result *Frame = List; Frame; Frame = Frame->next) {
         char *Values[Result_Count] = {};
         mi_result *Tuple = Frame->variant.result;
-        getBatchResultString(Tuple, GdbNames, Values, Result_Count);
+        getBatchResultString(Tuple, GdbKeys, Values, Result_Count);
 
         emacs_value ListValues[Result_Count];
         getEmacsStrings(Env, Values, ListValues, Result_Count, false);
@@ -327,14 +333,14 @@ static void getVariables(emacs_env *Env, mi_result *List, emacs_value Frame) {
     bufPush(Args, Frame);
 
 #define resultKeys(W) W(Name, name), W(Type, type), W(Value, value)
-    gdbNamesWriter(GdbNames, resultKeys);
+    gdbNamesWriter(GdbKeys, resultKeys);
     enumWriter(resultKeys);
 #undef  resultKeys
 
     for(mi_result *Variable = List; Variable; Variable = Variable->next) {
         char *Values[Result_Count] = {};
         mi_result *Tuple = Variable->variant.result;
-        getBatchResultString(Tuple, GdbNames, Values, Result_Count);
+        getBatchResultString(Tuple, GdbKeys, Values, Result_Count);
 
         emacs_value ListValues[Result_Count];
         getEmacsStrings(Env, Values, ListValues, Result_Count, false);
@@ -352,12 +358,12 @@ static void watcherCreate(emacs_env *Env, mi_result *Tuple, emacs_value Data) {
         W(Type, type),                          \
         W(ThreadId, thread-id)
 
-    gdbNamesWriter(GdbNames, resultKeys);
+    gdbNamesWriter(GdbKeys, resultKeys);
     enumWriter(resultKeys);
 #undef resultKeys
 
     char *Values[Result_Count] = {};
-    getBatchResultString(Tuple, GdbNames, Values, Result_Count);
+    getBatchResultString(Tuple, GdbKeys, Values, Result_Count);
 
     emacs_value Args[1 + Result_Count];
     Args[0] = Data;
@@ -375,14 +381,14 @@ static void watchersUpdate(emacs_env *Env, mi_result *List) {
         W(NewType, new_type),                   \
         W(NewNumChildren, new_num_children)
 
-    gdbNamesWriter(GdbNames, resultKeys);
+    gdbNamesWriter(GdbKeys, resultKeys);
     enumWriter(resultKeys);
 #undef  resultKeys
 
     for(mi_result *Variable = List; Variable; Variable = Variable->next) {
         char *Values[Result_Count] = {};
         mi_result *Tuple = Variable->variant.result;
-        getBatchResultString(Tuple, GdbNames, Values, Result_Count);
+        getBatchResultString(Tuple, GdbKeys, Values, Result_Count);
 
         emacs_value ListValues[Result_Count];
         getEmacsStrings(Env, Values, ListValues, Result_Count, false);
@@ -404,14 +410,14 @@ static void watcherAddChildren(emacs_env *Env, mi_result *List, emacs_value Watc
         W(Type, type),                          \
         W(ThreadId, thread-id)
 
-    gdbNamesWriter(GdbNames, resultKeys);
+    gdbNamesWriter(GdbKeys, resultKeys);
     enumWriter(resultKeys);
 #undef  resultKeys
 
     for(mi_result *Child = List; Child; Child = Child->next) {
         char *Values[Result_Count] = {};
         mi_result *Tuple = Child->variant.result;
-        getBatchResultString(Tuple, GdbNames, Values, Result_Count);
+        getBatchResultString(Tuple, GdbKeys, Values, Result_Count);
 
         emacs_value ListValues[Result_Count];
         getEmacsStrings(Env, Values, ListValues, Result_Count, false);
@@ -420,6 +426,72 @@ static void watcherAddChildren(emacs_env *Env, mi_result *List, emacs_value Watc
 
     funcall(Env, WatcherAddChildren, bufLen(Args), Args);
     bufFree(Args);
+}
+
+static void setRegisterNames(emacs_env *Env, mi_result *List, emacs_value Thread) {
+    emacs_value *Args = 0;
+    bufPush(Args, Thread);
+
+    for(mi_result *Element = List; Element; Element = Element->next) {
+        bufPush(Args, getEmacsString(Env, Element->variant.cstring));
+    }
+
+    funcall(Env, SetRegisterNames, bufLen(Args), Args);
+    bufFree(Args);
+}
+
+static void updateRegisters(emacs_env *Env, mi_result *List, emacs_value Thread) {
+    emacs_value *Args = 0;
+    bufPush(Args, Thread);
+
+#define resultKeys(W) W(Number, number),        \
+        W(Value, value)
+
+    gdbNamesWriter(GdbKeys, resultKeys);
+    enumWriter(resultKeys);
+#undef  resultKeys
+
+    for(mi_result *Register = List; Register; Register = Register->next) {
+        char *Values[Result_Count] = {};
+        mi_result *Tuple = Register->variant.result;
+        getBatchResultString(Tuple, GdbKeys, Values, Result_Count);
+
+        emacs_value ListValues[Result_Count];
+        getEmacsStrings(Env, Values, ListValues, Result_Count, false);
+        bufPush(Args, funcall(Env, Cons, Result_Count, ListValues));
+    }
+
+    funcall(Env, UpdateRegisters, bufLen(Args), Args);
+    bufFree(Args);
+}
+
+static void getChangedRegisters(emacs_env *Env, mi_result *List, emacs_value DataCons) {
+    emacs_value Thread = funcall(Env, Cdr, 1, &DataCons);
+    if(List) {
+        char Type[2];
+        ptrdiff_t TypeSize = arrayCount(Type);
+        Env->copy_string_contents(Env, funcall(Env, Car, 1, &DataCons), Type, &TypeSize);
+
+        char *Cmd = 0;
+        bufPrintf(Cmd, "-data-list-register-values --skip-unavailable %s", Type);
+        for(mi_result *Element = List;
+            Element;
+            Element = Element->next)
+        {
+            bufPrintf(Cmd, " %s", Element->variant.cstring);
+        }
+
+        emacs_value Args[] = {
+            getEmacsString(Env, Cmd),
+            funcall(Env, Cons, 2, (emacs_value[]){intern(Env, "gdb--context-registers-update"), Thread}),
+            Thread
+        };
+        funcall(Env, GdbCmd, arrayCount(Args), Args);
+        bufFree(Cmd);
+    } else {
+        // NOTE(nox): Update registers nonetheless in order to update tick and remove modified highlight
+        updateRegisters(Env, 0, Thread);
+    }
 }
 
 static void disassemble(emacs_env *Env, mi_result *List, emacs_value Buffer) {
@@ -443,7 +515,6 @@ static void disassemble(emacs_env *Env, mi_result *List, emacs_value Buffer) {
 
     u32 SourceInfoInstrListIndex = 3;
     emacs_value DisassemblyList = Nil;
-    emacs_value Cons = intern(Env, "cons");
 
     for(mi_result *Iterator = List; Iterator; Iterator = Iterator->next) {
         mi_result *Contents = Iterator->variant.result;
@@ -598,6 +669,9 @@ typedef struct token_context {
         Context_WatcherUpdate,
         Context_WatcherListChildren,
         Context_WatcherChangeFormat,
+        Context_RegistersListNames,
+        Context_RegistersGetChanged,
+        Context_RegistersUpdate,
         Context_Disassemble,
         Context_PersistThread,
         Context_GetData,
@@ -614,10 +688,10 @@ static token_context getTokenContext(emacs_env *Env, char *TokenString) {
         emacs_value Arg = getEmacsString(Env, TokenString);
         emacs_value ContextCons = funcall(Env, ExtractContext, 1, &Arg);
 
-        Result.Type = Env->extract_integer(Env, internFuncall(Env, "car", 1, &ContextCons));
+        Result.Type = Env->extract_integer(Env, funcall(Env, Car, 1, &ContextCons));
         assert(Result.Type < Context_Size);
 
-        Result.Data = internFuncall(Env, "cdr", 1, &ContextCons);
+        Result.Data = funcall(Env, Cdr, 1, &ContextCons);
     }
     return Result;
 }
@@ -680,6 +754,18 @@ static void handleMiResultRecord(emacs_env *Env, mi_result_record *Record, char 
                     char *Value = getResultString(Result, "value");
                     funcall(Env, WatcherFormatChange, 2,
                             (emacs_value[]){Context.Data, getEmacsString(Env, Value)});
+                } break;
+
+                case Context_RegistersListNames: {
+                    setRegisterNames(Env, getResultList(Result, "register-names"), Context.Data);
+                } break;
+
+                case Context_RegistersGetChanged: {
+                    getChangedRegisters(Env, getResultList(Result, "changed-registers"), Context.Data);
+                } break;
+
+                case Context_RegistersUpdate: {
+                    updateRegisters(Env, getResultList(Result, "register-values"), Context.Data);
                 } break;
 
                 case Context_Disassemble: {
