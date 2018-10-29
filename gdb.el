@@ -77,9 +77,71 @@ This can also be set to t, which means that all debug components are active."
   :version "26.1")
 
 (defface gdb-function-face '((t :inherit font-lock-function-name-face))
-  "Face for highlighting function names in tables."
+  "Face for highlighting function names."
   :group 'gdb
   :version "26.1")
+
+(defface gdb-constant-face '((t :inherit font-lock-constant-face))
+  "Face for highlighting constant values."
+  :group 'gdb
+  :version "26.1")
+
+(defface gdb-variable-face '((t :inherit font-lock-variable-name-face))
+  "Face for highlighting variable and register names in watcher, variables and registers buffers.")
+
+(defface gdb-type-face '((t :inherit font-lock-type-face))
+  "Face for highlighting types names in watcher and variables buffers.")
+
+(defface gdb-modified-face '((t :inherit error))
+  "Face for highlighting modified values in watcher and register buffers."
+  :group 'gdb
+  :version "26.1")
+
+(defface gdb-disassembly-src-face '((t :inherit font-lock-string-face))
+  "Face for highlighting the source code in disassembly buffers."
+  :group 'gdb
+  :version "26.1")
+
+(defface gdb-disassembly-line-indicator-face '((t :inherit font-lock-type-face))
+  "Face for highlighting the source code line number in disassembly buffers."
+  :group 'gdb
+  :version "26.1")
+
+(defface gdb-opcode-face '((t :inherit font-lock-keyword-face))
+  "Face for highlighting opcodes in disassembly buffers."
+  :group 'gdb
+  :version "26.1")
+
+(defface gdb-raw-opcode-face '((t :inherit font-lock-comment-face))
+  "Face for highlighting raw opcodes in disassembly buffers."
+  :group 'gdb
+  :version "26.1")
+
+(eval-when-compile
+  (defface gdb-running-face '((t :inherit font-lock-string-face))
+    "Face for highlighting the \"running\" keyword."
+    :group 'gdb
+    :version "26.1")
+
+  (defface gdb-stopped-face '((t :inherit font-lock-warning-face))
+    "Face for highlighting the \"stopped\" keyword."
+    :group 'gdb
+    :version "26.1")
+
+  (defface gdb-out-of-scope-face '((t :inherit font-lock-comment-face))
+    "Face for highlighting \"Out of scope\" in watcher buffers."
+    :group 'gdb
+    :version "26.1")
+
+  (defface gdb-y-face '((t :inherit font-lock-warning-face))
+    "Face for highlighting the enabled symbol \"y\" in breakpoint buffers."
+    :group 'gdb
+    :version "26.1")
+
+  (defface gdb-n-face '((t :inherit font-lock-comment-face))
+    "Face for highlighting the disabled symbol \"n\" in breakpoint buffers."
+    :group 'gdb
+    :version "26.1"))
 
 
 ;; ------------------------------------------------------------------------------------------
@@ -214,7 +276,7 @@ DATA is an alist and must at least include `type'."
             (if (display-images-p)
                 (setq property
                       `(left-fringe gdb--fringe-breakpoint
-                        ,(if enabled 'gdb-breakpoint-enabled-face 'gdb-breakpoint-disabled-face)))
+                                    ,(if enabled 'gdb-breakpoint-enabled-face 'gdb-breakpoint-disabled-face)))
               (setq property `((margin left-margin) ,(if enabled "B" "b"))))))
 
          ((memq type '(source-indicator frame-indicator thread-indicator disassembly-indicator))
@@ -537,8 +599,8 @@ All embedded quotes, newlines, and backslashes are preceded with a backslash."
 
 (defun gdb--location-string (&optional func file line from addr)
   (when file (setq file (file-name-nondirectory file)))
-  (concat "in " (propertize (or func "??") 'face font-lock-function-name-face)
-          (and addr (concat " at " (propertize addr 'face 'font-lock-constant-face)))
+  (concat "in " (propertize (or func "??") 'face 'gdb-function-face)
+          (and addr (concat " at " (propertize addr 'face 'gdb-constant-face)))
           (or (and file line (format " of %s:%d" file line))
               (and from (concat " of " from)))))
 
@@ -1093,8 +1155,8 @@ stopped thread before running the command. If FORCE-STOPPED is
              (name (gdb--thread-name thread))
              (state-display
               (if (string= (gdb--thread-state thread) "running")
-                  (eval-when-compile (propertize "running" 'face font-lock-string-face))
-                (eval-when-compile (propertize "stopped" 'face font-lock-warning-face))))
+                  (eval-when-compile (propertize "running" 'face 'gdb-running-face))
+                (eval-when-compile (propertize "stopped" 'face 'gdb-stopped-face))))
              (core (gdb--thread-core thread))
              (frame-str (gdb--frame-location-string (car (gdb--thread-frames thread)) t)))
          (gdb--table-add-row table (list id-str target-id name state-display core frame-str)
@@ -1138,7 +1200,7 @@ stopped thread before running the command. If FORCE-STOPPED is
      (gdb--table-add-header table '("Level" "Address" "Where"))
      (dolist (frame frames)
        (let ((level-str (number-to-string (gdb--frame-level frame)))
-             (addr (gdb--add-face (gdb--frame-addr frame) 'font-lock-constant-face))
+             (addr (gdb--add-face (gdb--frame-addr frame) 'gdb-constant-face))
              (where (gdb--frame-location-string frame)))
          (gdb--table-add-row table (list level-str addr where) (list 'gdb--frame frame))
 
@@ -1178,14 +1240,14 @@ stopped thread before running the command. If FORCE-STOPPED is
      (gdb--table-add-header table '("Num" "Type" "Disp" "Enb" "Addr" "Hits" "Ign" "What"))
      (dolist (breakpoint breakpoints)
        (let ((enabled-disp (if (gdb--breakpoint-enabled breakpoint)
-                               (eval-when-compile (propertize "y" 'face font-lock-warning-face))
-                             (eval-when-compile (propertize "n" 'face font-lock-comment-face)))))
+                               (eval-when-compile (propertize "y" 'face 'gdb-y-face))
+                             (eval-when-compile (propertize "n" 'face 'gdb-n-face)))))
 
          (gdb--table-add-row table (list (number-to-string (gdb--breakpoint-number breakpoint))
                                          (gdb--breakpoint-type breakpoint)
                                          (gdb--breakpoint-disp breakpoint)
                                          enabled-disp
-                                         (gdb--add-face (gdb--breakpoint-addr breakpoint) 'font-lock-constant-face)
+                                         (gdb--add-face (gdb--breakpoint-addr breakpoint) 'gdb-constant-face)
                                          (gdb--breakpoint-hits breakpoint)
                                          (gdb--nts (gdb--breakpoint-ignore-count breakpoint))
                                          (gdb--breakpoint-what breakpoint))
@@ -1229,8 +1291,8 @@ stopped thread before running the command. If FORCE-STOPPED is
      (gdb--table-add-header table '("Name" "Type" "Value"))
      (dolist (variable variables)
        (gdb--table-add-row
-        table (list (propertize (gdb--variable-name  variable) 'face 'font-lock-variable-name-face)
-                    (propertize (gdb--variable-type  variable) 'face 'font-lock-type-face)
+        table (list (propertize (gdb--variable-name  variable) 'face 'gdb-variable-face)
+                    (propertize (gdb--variable-type  variable) 'face 'gdb-type-face)
                     (or         (gdb--variable-value variable) "<Composite type>"))
         (list 'gdb--var variable)))
      (gdb--table-insert table))))
@@ -1267,12 +1329,12 @@ stopped thread before running the command. If FORCE-STOPPED is
   (let* ((out-of-scope (eq (gdb--watcher-flag watcher) 'out-of-scope))
          (row (gdb--table-add-row
                table-or-parent
-               (list (gdb--add-face (gdb--watcher-expr watcher)  'font-lock-variable-name-face)
-                     (gdb--add-face (gdb--watcher-type watcher)  'font-lock-type-face)
+               (list (gdb--add-face (gdb--watcher-expr watcher)  'gdb-variable-face)
+                     (gdb--add-face (gdb--watcher-type watcher)  'gdb-type-face)
                      (if out-of-scope
-                         (eval-when-compile (propertize "Out of scope" 'face 'font-lock-comment-face))
+                         (eval-when-compile (propertize "Out of scope" 'face 'gdb-out-of-scope-face))
                        (gdb--add-face (gdb--watcher-value watcher)
-                                      (and (eq (gdb--watcher-flag watcher) tick) 'error))))
+                                      (and (eq (gdb--watcher-flag watcher) tick) 'gdb-modified-face))))
                (list 'gdb--watcher watcher)
                (and (not out-of-scope) (> (gdb--watcher-children-count watcher) 0))))
          (children (gdb--watcher-children watcher)))
@@ -1360,10 +1422,10 @@ stopped thread before running the command. If FORCE-STOPPED is
                 for  reg-tick = (and reg (gdb--register-tick reg))
                 when reg
                 do   (gdb--table-add-row
-                      table (list (propertize (gdb--register-name  reg) 'face 'font-lock-variable-name-face)
+                      table (list (propertize (gdb--register-name  reg) 'face 'gdb-variable-face)
                                   (gdb--add-face (gdb--register-value reg)
                                                  (when (and reg-tick (= tick reg-tick))
-                                                   'error)))
+                                                   'gdb-modified-face)))
                       (list 'gdb--register reg))))
      (gdb--table-insert table))))
 
@@ -1378,19 +1440,19 @@ stopped thread before running the command. If FORCE-STOPPED is
     map))
 
 (defconst gdb--disassembly-font-lock-keywords
-  '(;; 0xNNNNNNNN opcode
+  '(;; 0xNNNNNNNN [RawOpcode] Opcode
     ("^0x[[:xdigit:]]+[[:space:]]+\\(\\(?:[0-9a-fA-F][0-9a-fA-F] \\)*\\)\\(\\sw+\\)"
-     (1 font-lock-comment-face nil t) (2 font-lock-keyword-face))
+     (1 'gdb-raw-opcode-face nil t) (2 'gdb-opcode-face))
     ;; Hexadecimals
-    ("0x[[:xdigit:]]+" . font-lock-constant-face)
+    ("0x[[:xdigit:]]+" . 'gdb-constant-face)
     ;; Source lines
     ("^\\(Line [0-9]+\\)\\(.*\\)$"
-     (1 font-lock-type-face) (2 font-lock-string-face))
+     (1 'gdb-disassembly-line-indicator-face) (2 'gdb-disassembly-src-face))
     ;; %register(at least i386)
-    ("%\\sw+" . font-lock-variable-name-face)
+    ("%\\sw+" . 'gdb-variable-face)
     ;; <FunctionName+Number>
     ("<\\([^+>]+\\)\\(?:\\+\\([0-9]+\\)\\)?>"
-     (1 font-lock-function-name-face) (2 font-lock-constant-face nil t)))
+     (1 'gdb-function-face) (2 'gdb-constant-face nil t)))
   "Font lock keywords used in `gdb--disassembly'.")
 
 (define-derived-mode gdb-disassembly-mode nil "GDB Disassembly"
