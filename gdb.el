@@ -324,12 +324,11 @@ that are not created by GDB."
 (defun gdb--best-frame-to-switch-to (thread)
   "Return the most relevant frame to switch to in THREAD's frames."
   (when thread
-    (let ((fallback (car (gdb--thread-frames thread)))
-          runner-up)
-      (or (cl-loop for frame in (gdb--thread-frames thread)
-                   when (and (gdb--frame-file frame) (gdb--frame-line frame)) return frame
-                   when (gdb--frame-file frame) do (setq runner-up frame))
-          runner-up fallback))))
+    (let ((fallback (car (gdb--thread-frames thread))))
+      (or (unless (gdb--disassembly-is-visible)
+            (cl-loop for frame in (gdb--thread-frames thread)
+                     when (and (gdb--frame-file frame) (gdb--frame-line frame)) return frame))
+          fallback))))
 
 (defun gdb--switch-to-thread (thread &optional auto)
   "Unconditionally switch to _different_ THREAD. This will also switch to the most relevant frame.
@@ -1403,8 +1402,10 @@ stopped thread before running the command. If FORCE-STOPPED is
            for offset     = (gdb--disassembly-instr-offset  instr)
            for opcodes    = (gdb--disassembly-instr-opcodes instr)
            when (= addr-num current-addr-num) do (setf (gv-deref target-ref) (gdb--current-line))
-           do (insert (propertize (format fmt addr (or (and opcodes (concat opcodes " ")) "") instr-text
-                                          (gdb--disassembly-func-and-offset func offset))
+           do (insert (propertize
+                       (if opcodes
+                           (format fmt addr opcodes instr-text (gdb--disassembly-func-and-offset func offset))
+                         (format fmt addr instr-text (gdb--disassembly-func-and-offset func offset)))
                        'gdb--instr instr
                        'gdb--addr-num addr-num))))
 
@@ -1423,7 +1424,9 @@ stopped thread before running the command. If FORCE-STOPPED is
       ((gdb--disassembly-data-new data)
        (let* ((widths (gdb--disassembly-data-widths data))
               (src-fmt   (format "Line %%-%ds %%s\n" (- (aref widths 0) 5)))
-              (instr-fmt (format "%%-%ds %%%ds%%-%ds %%s\n" (aref widths 0) (aref widths 1) (aref widths 2))))
+              (instr-fmt (if (> (aref widths 1) 0)
+                             (format "%%-%ds %%%ds %%-%ds %%s\n" (aref widths 0) (aref widths 1) (aref widths 2))
+                           (format "%%-%ds %%-%ds %%s\n" (aref widths 0) (aref widths 2)))))
          (setf (gdb--disassembly-data-new data) nil)
          (erase-buffer)
          (gdb--remove-symbols-in-curr-buffer 'breakpoint-indicator)
