@@ -45,38 +45,39 @@ typedef struct gdbwire_mi_parser_callbacks gdbwire_callbacks;
 
 u32 plugin_is_GPL_compatible;
 
-#define interns(W) W(Nil, nil)                              \
-        W(T, t)                                             \
-        W(Cons, cons)                                       \
-        W(Car, car)                                         \
-        W(Cdr, cdr)                                         \
-        W(VecFunc, vector)                                  \
-        W(ListFunc, list)                                   \
-        W(DeleteProcess, delete-process)                    \
-                                                            \
-        W(GdbCmd, gdb--command)                             \
-        W(ExtractContext, gdb--extract-context)             \
-        W(SetData, gdb--set-data)                           \
-        W(LogError, gdb--log-error)                         \
-                                                            \
-        W(SetInitialFile, gdb--set-initial-file)            \
-        W(RunningFunc, gdb--running)                        \
-        W(GetThreadInfo, gdb--get-thread-info)              \
-        W(UpdateThread, gdb--update-thread)                 \
-        W(AddFramesToThread, gdb--add-frames-to-thread)     \
-        W(ThreadExited, gdb--thread-exited)                 \
-        W(BreakpointChanged, gdb--breakpoint-changed)       \
-        W(BreakpointDeleted, gdb--breakpoint-deleted)       \
-        W(AddVariablesToFrame, gdb--add-variables-to-frame) \
-        W(NewWatcherInfo, gdb--new-watcher-info)            \
-        W(WatchersUpdateInfo, gdb--watchers-update-info)    \
-        W(WatcherAddChildren, gdb--watcher-add-children)    \
-        W(WatcherFormatChange, gdb--watcher-format-change)  \
-        W(SetRegisterNames, gdb--set-register-names)        \
-        W(UpdateRegisters, gdb--update-registers)           \
-        W(SetDisassembly, gdb--set-disassembly)             \
-        W(MakeInstr, make-gdb--disassembly-instr)           \
-        W(MakeSrc, make-gdb--disassembly-src)               \
+#define interns(W) W(Nil, nil)                                      \
+        W(T, t)                                                     \
+        W(Cons, cons)                                               \
+        W(Car, car)                                                 \
+        W(Cdr, cdr)                                                 \
+        W(VecFunc, vector)                                          \
+        W(ListFunc, list)                                           \
+        W(DeleteProcess, delete-process)                            \
+                                                                    \
+        W(GdbCmd, gdb--command)                                     \
+        W(ExtractContext, gdb--extract-context)                     \
+        W(SetData, gdb--set-data)                                   \
+        W(LogError, gdb--log-error)                                 \
+                                                                    \
+        W(SetInitialFile, gdb--set-initial-file)                    \
+        W(RunningFunc, gdb--running)                                \
+        W(GetThreadInfo, gdb--get-thread-info)                      \
+        W(UpdateThread, gdb--update-thread)                         \
+        W(AddFramesToThread, gdb--add-frames-to-thread)             \
+        W(ThreadExited, gdb--thread-exited)                         \
+        W(BreakpointChanged, gdb--breakpoint-changed)               \
+        W(BreakpointEnableDisable, gdb--breakpoint-enable-disable)  \
+        W(BreakpointDeleted, gdb--breakpoint-deleted)               \
+        W(AddVariablesToFrame, gdb--add-variables-to-frame)         \
+        W(NewWatcherInfo, gdb--new-watcher-info)                    \
+        W(WatchersUpdateInfo, gdb--watchers-update-info)            \
+        W(WatcherAddChildren, gdb--watcher-add-children)            \
+        W(WatcherFormatChange, gdb--watcher-format-change)          \
+        W(SetRegisterNames, gdb--set-register-names)                \
+        W(UpdateRegisters, gdb--update-registers)                   \
+        W(SetDisassembly, gdb--set-disassembly)                     \
+        W(MakeInstr, make-gdb--disassembly-instr)                   \
+        W(MakeSrc, make-gdb--disassembly-src)                       \
         W(PersistThread, gdb--persist-thread)
     ; // Weird indentation...
 
@@ -728,6 +729,7 @@ typedef struct token_context {
         Context_ThreadInfo,
         Context_FrameInfo,
         Context_BreakpointInsert,
+        Context_BreakpointEnableDisable,
         Context_BreakpointDelete,
         Context_GetVariables,
         Context_WatcherCreate,
@@ -786,6 +788,10 @@ static void handleMiResultRecord(emacs_env *Env, mi_result_record *Record, char 
 
                 case Context_BreakpointInsert: {
                     breakpointChange(Env, getResultTuple(Result, "bkpt"));
+                } break;
+
+                case Context_BreakpointEnableDisable: {
+                    funcall(Env, BreakpointEnableDisable, 1, &Context.Data);
                 } break;
 
                 case Context_BreakpointDelete: {

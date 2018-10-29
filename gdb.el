@@ -155,6 +155,7 @@ This can also be set to t, which means that all debug components are active."
     gdb--context-thread-info
     gdb--context-frame-info ;; Data: Thread
     gdb--context-breakpoint-insert
+    gdb--context-breakpoint-enable-disable ;; Data: (Breakpoint . NewState)
     gdb--context-breakpoint-delete ;; Data: Breakpoint
     gdb--context-get-variables ;; Data: Frame
     gdb--context-watcher-create ;; Data: (Expression . WatcherToReplace)
@@ -1218,9 +1219,11 @@ stopped thread before running the command. If FORCE-STOPPED is
 ;; Breakpoints buffer
 (defvar gdb-breakpoints-mode-map
   (let ((map (make-sparse-keymap)))
-    (define-key map (kbd "p") #'previous-line)
-    (define-key map (kbd "n") #'next-line)
-    (define-key map (kbd "d") #'gdb-delete-breakpoint)
+    (define-key map (kbd           "p") #'previous-line)
+    (define-key map (kbd           "n") #'next-line)
+    (define-key map (kbd         "SPC") #'gdb-breakpoint-enable-disable)
+    (define-key map (kbd     "<space>") #'gdb-breakpoint-enable-disable)
+    (define-key map (kbd           "d") #'gdb-delete-breakpoint)
     (define-key map (kbd "<backspace>") #'gdb-delete-breakpoint)
     map))
 
@@ -1755,6 +1758,15 @@ it from the list."
      (gdb--place-breakpoint session breakpoint)
      (cl-pushnew 'gdb--breakpoints (gdb--session-buffer-types-to-update session)))))
 
+(defun gdb--breakpoint-enable-disable (arg)
+  (gdb--with-valid-session
+   (let ((breakpoint (car arg))
+         (state      (cdr arg)))
+     (setf (gdb--breakpoint-enabled breakpoint) state)
+     (gdb--breakpoint-remove-symbol breakpoint)
+     (gdb--place-breakpoint session breakpoint))
+   (cl-pushnew 'gdb--breakpoints (gdb--session-buffer-types-to-update session))))
+
 (defun gdb--breakpoint-deleted (arg) ;; NOTE(nox): ARG may be ID number or breakpoint object
   (gdb--with-valid-session
    (let ((number (and (eq (type-of arg) 'string) (string-to-number arg))))
@@ -2249,6 +2261,16 @@ If ARG is `dprintf' create a dprintf breakpoint instead."
 (defun gdb-toggle-dprintf ()
   (interactive)
   (gdb-toggle-breakpoint 'dprintf))
+
+(defun gdb-breakpoint-enable-disable ()
+  (interactive)
+  (gdb--with-valid-session
+   (let ((breakpoint (gdb--infer-breakpoint)))
+     (unless breakpoint (user-error "No breakpoint under cursor"))
+     (gdb--command (format "%s %d" (if (gdb--breakpoint-enabled breakpoint) "-break-disable " "-break-enable ")
+                           (gdb--breakpoint-number breakpoint))
+                   (cons 'gdb--context-breakpoint-enable-disable
+                         (cons breakpoint (not (gdb--breakpoint-enabled breakpoint))))))))
 
 (defun gdb-delete-breakpoint ()
   (interactive)
