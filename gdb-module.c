@@ -50,6 +50,7 @@ u32 plugin_is_GPL_compatible;
         W(Cons, cons)                                       \
         W(Car, car)                                         \
         W(Cdr, cdr)                                         \
+        W(VecFunc, vector)                                  \
         W(ListFunc, list)                                   \
         W(DeleteProcess, delete-process)                    \
                                                             \
@@ -506,7 +507,14 @@ static void getChangedRegisters(emacs_env *Env, mi_result *List, emacs_value Dat
     }
 }
 
-static emacs_value instructionList(emacs_env *Env, mi_result *InstrsList) {
+typedef struct instrs_info {
+    int AddrWidth;
+    int InstrWidth;
+    int OpcodeWidth;
+    emacs_value List;
+} instrs_info;
+
+static instrs_info instructionsInfo(emacs_env *Env, mi_result *InstrsList) {
     emacs_value *Args = 0;
 
 #define resultKeys(W) W(Addr, address, addr),   \
@@ -520,10 +528,27 @@ static emacs_value instructionList(emacs_env *Env, mi_result *InstrsList) {
     emacs_value InstrInterns[] = {resultKeys(writeElispStructKey)};
 #undef  resultKeys
 
+    instrs_info Result = {};
+
+    if(InstrsList) {
+        char *FirstAddr = getResultString(InstrsList->variant.result, InstrKeys[Result_Addr]);
+        Result.AddrWidth = strlen(FirstAddr ? FirstAddr : "");
+    }
+
     for(mi_result *Instr = InstrsList; Instr; Instr = Instr->next) {
         char *InstrValues[InstrKey_Count] = {};
         mi_result *InstrTuple = Instr->variant.result;
         getBatchResultString(InstrTuple, InstrKeys, InstrValues, InstrKey_Count);
+
+        if(InstrValues[Result_Instr]) {
+            int Width = strlen(InstrValues[Result_Instr]);
+            Result.InstrWidth = max(Result.InstrWidth, Width);
+        }
+
+        if(InstrValues[Result_RawOp]) {
+            int Width = strlen(InstrValues[Result_RawOp]);
+            Result.OpcodeWidth = max(Result.OpcodeWidth, Width);
+        }
 
         emacs_value MakeArgs[] = {
             InstrInterns[Result_Addr],   getEmacsString(Env, InstrValues[Result_Addr]),
@@ -535,7 +560,7 @@ static emacs_value instructionList(emacs_env *Env, mi_result *InstrsList) {
         bufPush(Args, funcall(Env, MakeInstr, arrayCount(MakeArgs), MakeArgs));
     }
 
-    emacs_value Result = funcall(Env, ListFunc, bufLen(Args), Args);
+    Result.List = funcall(Env, ListFunc, bufLen(Args), Args);
     bufFree(Args);
     return Result;
 }
@@ -555,6 +580,11 @@ static void disassemble(emacs_env *Env, mi_result *List, emacs_value BuffData) {
     if(HasSourceInfo) {
         emacs_value *Args = 0;
         bufPush(Args, BuffData);
+        bufPush(Args, 0); // NOTE(nox): Width vector
+
+        int AddrWidth   = 0;
+        int OpcodeWidth = 0;
+        int InstrWidth  = 0;
 
         for(mi_result *Src = List; Src; Src = Src->next) {
             char *SrcValues[SrcKey_Count-1] = {};
@@ -562,22 +592,40 @@ static void disassemble(emacs_env *Env, mi_result *List, emacs_value BuffData) {
             getBatchResultString(SrcTuple, SrcKeys, SrcValues, arrayCount(SrcValues));
 
             mi_result *Instrs = getResultList(SrcTuple, SrcKeys[Result_Instrs]);
-            emacs_value InstrList = instructionList(Env, Instrs);
+            instrs_info InstrsInfo = instructionsInfo(Env, Instrs);
+
+            AddrWidth   = max(AddrWidth,   InstrsInfo.AddrWidth);
+            OpcodeWidth = max(OpcodeWidth, InstrsInfo.OpcodeWidth);
+            InstrWidth  = max(InstrWidth,  InstrsInfo.InstrWidth);
 
             emacs_value MakeArgs[] = {
                 SrcInterns[Result_File],   getEmacsString(Env, SrcValues[Result_File]),
                 SrcInterns[Result_Line],   getEmacsString(Env, SrcValues[Result_Line]),
-                SrcInterns[Result_Instrs], InstrList
+                SrcInterns[Result_Instrs], InstrsInfo.List
             };
             bufPush(Args, funcall(Env, MakeSrc, arrayCount(MakeArgs), MakeArgs));
         }
 
+        emacs_value VecArgs[] = {
+            Env->make_integer(Env, AddrWidth),
+            Env->make_integer(Env, OpcodeWidth),
+            Env->make_integer(Env, InstrWidth)
+        };
+        Args[1] = funcall(Env, VecFunc, arrayCount(VecArgs), VecArgs);
+
         funcall(Env, SetDisassembly, bufLen(Args), Args);
         bufFree(Args);
     } else {
+        instrs_info InstrsInfo = instructionsInfo(Env, List);
+        emacs_value VecArgs[] = {
+            Env->make_integer(Env, InstrsInfo.AddrWidth),
+            Env->make_integer(Env, InstrsInfo.OpcodeWidth),
+            Env->make_integer(Env, InstrsInfo.InstrWidth)
+        };
         emacs_value Args[] = {
             BuffData,
-            instructionList(Env, List)
+            funcall(Env, VecFunc, arrayCount(VecArgs), VecArgs),
+            InstrsInfo.List
         };
 
         funcall(Env, SetDisassembly, arrayCount(Args), Args);
