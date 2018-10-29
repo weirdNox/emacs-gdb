@@ -26,15 +26,60 @@
 
 ;; ------------------------------------------------------------------------------------------
 ;; User configurable variables
-(defvar gdb-debug nil
+(defgroup gdb nil
+  "A GDB graphical interface"
+  :group 'tools
+  :version "26.1")
+
+(defcustom gdb-watchers-hide-access-specifiers t
+  "When non-nil, this will hide the access specifiers in the watchers.
+This can be changed in a debugging session with the command `gdb-watchers-toggle-access-specifiers'."
+  :group 'gdb
+  :type  'boolean
+  :version "26.1")
+
+(defcustom gdb-debug nil
   "List of debug symbols, which will enable different components.
 Possible values are:
   - `timings': show timings of some function calls
-  - `commands': show which GDB commands are sent
+  - `commands': print to the messages buffer which GDB commands are sent
   - `raw-input': send comint input as is
   - `raw-output': print GDB/MI output to the messages buffer
 
-This can also be set to t, which means that all debug components are active.")
+This can also be set to t, which means that all debug components are active."
+  :group 'gdb
+  :type  '(choice boolean
+                  (set (const :tag "Timings of some function calls" timings)
+                       (const :tag "Print, to the messages buffer, which GDB commands are sent" commands)
+                       (const :tag "Send comint input as is" raw-input)
+                       (const :tag "Print GDB/MI output to the messages buffer" raw-output)))
+  :version "26.1")
+
+
+;; ------------------------------------------------------------------------------------------
+;; Faces and bitmaps
+(define-fringe-bitmap 'gdb--fringe-breakpoint "\x3c\x7e\xff\xff\xff\xff\x7e\x3c")
+
+(defface gdb-breakpoint-enabled-face
+  '((t :foreground "red1" :weight bold))
+  "Face for enabled breakpoint icon in fringe."
+  :group 'gdb
+  :version "26.1")
+
+(defface gdb-breakpoint-disabled-face
+  '((((class color) (min-colors 88)) :foreground "gray70")
+    (((class color) (min-colors 8) (background light)) :foreground "black")
+    (((class color) (min-colors 8) (background dark)) :foreground "white")
+    (((type tty) (class mono)) :inverse-video t)
+    (t :background "gray"))
+  "Face for disabled breakpoint icon in fringe."
+  :group 'gdb
+  :version "26.1")
+
+(defface gdb-function-face '((t :inherit font-lock-function-name-face))
+  "Face for highlighting function names in tables."
+  :group 'gdb
+  :version "26.1")
 
 
 ;; ------------------------------------------------------------------------------------------
@@ -110,7 +155,8 @@ breakpoint of TYPE.")
   buffer-types-to-update buffers-to-update
   threads selected-thread persist-thread selected-frame
   breakpoints
-  (watchers-tick most-negative-fixnum) (watchers (make-hash-table :test 'equal)) root-watchers)
+  (watchers-tick most-negative-fixnum) (watchers (make-hash-table :test 'equal)) root-watchers
+  (hide-access-spec gdb-watchers-hide-access-specifiers))
 (defvar gdb--sessions nil
   "List of active sessions.")
 
@@ -135,23 +181,6 @@ This is shared among all sessions.")
 (defvar gdb--inhibit-display-source nil)
 (defvar gdb--open-buffer-new-frame  nil)
 (defvar gdb--data nil)
-
-
-;; ------------------------------------------------------------------------------------------
-;; Faces and bitmaps
-(define-fringe-bitmap 'gdb--fringe-breakpoint "\x3c\x7e\xff\xff\xff\xff\x7e\x3c")
-
-(defface gdb--breakpoint-enabled
-  '((t :foreground "red1" :weight bold))
-  "Face for enabled breakpoint icon in fringe.")
-
-(defface gdb--breakpoint-disabled
-  '((((class color) (min-colors 88)) :foreground "gray70")
-    (((class color) (min-colors 8) (background light)) :foreground "black")
-    (((class color) (min-colors 8) (background dark)) :foreground "white")
-    (((type tty) (class mono)) :inverse-video t)
-    (t :background "gray"))
-  "Face for disabled breakpoint icon in fringe.")
 
 
 ;; ------------------------------------------------------------------------------------------
@@ -183,8 +212,9 @@ DATA is an alist and must at least include `type'."
             (overlay-put overlay 'gdb--breakpoint breakpoint)
 
             (if (display-images-p)
-                (setq property `(left-fringe gdb--fringe-breakpoint
-                                             ,(if enabled 'gdb--breakpoint-enabled 'gdb--breakpoint-disabled)))
+                (setq property
+                      `(left-fringe gdb--fringe-breakpoint
+                        ,(if enabled 'gdb-breakpoint-enabled-face 'gdb-breakpoint-disabled-face)))
               (setq property `((margin left-margin) ,(if enabled "B" "b"))))))
 
          ((memq type '(source-indicator frame-indicator thread-indicator disassembly-indicator))
@@ -1173,9 +1203,13 @@ stopped thread before running the command. If FORCE-STOPPED is
   (let ((map (make-sparse-keymap)))
     (define-key map (kbd          "p") #'previous-line)
     (define-key map (kbd          "n") #'next-line)
+    (define-key map (kbd        "SPC") #'gdb-create-watcher-from)
     (define-key map (kbd        "RET") #'gdb-create-watcher-from)
+    (define-key map (kbd    "<space>") #'gdb-create-watcher-from)
     (define-key map (kbd   "<return>") #'gdb-create-watcher-from)
+    (define-key map (kbd      "S-SPC") #'gdb-create-watcher-from-ask)
     (define-key map (kbd      "S-RET") #'gdb-create-watcher-from-ask)
+    (define-key map (kbd  "<S-space>") #'gdb-create-watcher-from-ask)
     (define-key map (kbd "<S-return>") #'gdb-create-watcher-from-ask)
     map))
 
@@ -1214,6 +1248,7 @@ stopped thread before running the command. If FORCE-STOPPED is
     (define-key map (kbd        "e") #'gdb-watcher-edit-expression)
     (define-key map (kbd        "f") #'gdb-watcher-change-format)
     (define-key map (kbd        "d") #'gdb-watcher-duplicate)
+    (define-key map (kbd        "h") #'gdb-watchers-toggle-access-specifiers)
     (define-key map (kbd      "SPC") #'gdb-watcher-toggle)
     (define-key map (kbd      "TAB") #'gdb-watcher-toggle)
     (define-key map (kbd    "<tab>") #'gdb-watcher-toggle)
@@ -1296,9 +1331,13 @@ stopped thread before running the command. If FORCE-STOPPED is
     (define-key map (kbd          "p") #'previous-line)
     (define-key map (kbd          "n") #'next-line)
     (define-key map (kbd          "f") #'gdb-registers-change-format)
+    (define-key map (kbd        "SPC") #'gdb-create-watcher-from)
     (define-key map (kbd        "RET") #'gdb-create-watcher-from)
+    (define-key map (kbd    "<space>") #'gdb-create-watcher-from)
     (define-key map (kbd   "<return>") #'gdb-create-watcher-from)
+    (define-key map (kbd      "S-SPC") #'gdb-create-watcher-from-ask)
     (define-key map (kbd      "S-RET") #'gdb-create-watcher-from-ask)
+    (define-key map (kbd  "<S-space>") #'gdb-create-watcher-from-ask)
     (define-key map (kbd "<S-return>") #'gdb-create-watcher-from-ask)
     map))
 
@@ -1722,16 +1761,23 @@ it from the list."
 
 (defun gdb--watcher-add-children (parent &rest children)
   (gdb--with-valid-session
-   (setf (gdb--watcher-children-count parent) (length children))
-   (cl-loop for (name expr num-children value type thread-id) in children
-            do
-            (let ((watcher (make-gdb--watcher
-                            :name name :expr expr :type type :value value :parent parent
-                            :thread (gdb--get-thread-by-id (gdb--stn thread-id))
-                            :children-count (or (gdb--stn num-children) 0))))
-              (puthash name watcher (gdb--session-watchers session))
-              (push watcher (gdb--watcher-children parent)))
-            finally (setf (gdb--watcher-children parent) (nreverse (gdb--watcher-children parent))))
+   (setf
+    (gdb--watcher-children-count parent) (length children)
+    (gdb--watcher-children parent)
+    (append
+     (gdb--watcher-children parent)
+     (cl-loop for (name expr num-children value type thread-id) in children
+              if  (or (not (gdb--session-hide-access-spec session))
+                      type (> (length value) 0))
+              collect (let ((watcher (make-gdb--watcher :name name :expr expr :type type :value value :parent parent
+                                                        :thread (gdb--get-thread-by-id (gdb--stn thread-id))
+                                                        :children-count (or (gdb--stn num-children) 0))))
+                        (puthash name watcher (gdb--session-watchers session))
+                        watcher)
+              else ;; NOTE(nox): Both the value and the type are null, so this is an access qualifier
+              do (gdb--command (concat "-var-list-children --simple-values " name)
+                               (cons 'gdb--context-watcher-list-children parent)))))
+
    (cl-pushnew 'gdb--watchers (gdb--session-buffer-types-to-update session))))
 
 (defun gdb--watcher-format-change (watcher new-value)
@@ -1810,7 +1856,9 @@ it from the list."
 
    (let ((expression (cond ((consp default) (car default))
                            (t (gdb--read-line "Expression: " default)))))
-     (when (and expression (not (and watcher-to-replace (string= expression default))))
+     (when (and expression
+                (or (consp default) (not watcher-to-replace)
+                    (not (string= expression (gdb--watcher-expr watcher-to-replace)))))
        (gdb--command (format "-var-create - @ \"%s\"" expression)
                      (cons 'gdb--context-watcher-create (cons expression watcher-to-replace))
                      (gdb--session-selected-frame session))))))
@@ -1852,9 +1900,7 @@ it from the list."
    (when (gdb--is-buffer-type 'gdb--watchers)
      (let ((watcher (get-text-property (line-beginning-position) 'gdb--watcher)))
        (when (or (not watcher) (gdb--watcher-parent watcher)) (user-error "No root watcher under cursor"))
-       (gdb-watcher-add-expression
-        (gdb--get-data (concat "-var-info-path-expression " (gdb--watcher-name watcher)) "path_expr")
-        watcher)))))
+       (gdb-watcher-add-expression (gdb--watcher-expr watcher) watcher)))))
 
 (defun gdb-watcher-duplicate ()
   (interactive)
@@ -1879,6 +1925,13 @@ it from the list."
        (if arg
            (gdb--watcher-change-format-recursively (list watcher) format)
          (gdb--watcher-change-format watcher format))))))
+
+(defun gdb-watchers-toggle-access-specifiers ()
+  (interactive)
+  (gdb--with-valid-session
+   (setf (gdb--session-hide-access-spec session) (not (gdb--session-hide-access-spec session)))
+   (cl-loop for watcher in (gdb--session-root-watchers session)
+            do (gdb-watcher-add-expression (cons (gdb--watcher-expr watcher) nil) watcher))))
 
 (defun gdb-watcher-delete ()
   (interactive)
@@ -1907,6 +1960,7 @@ it from the list."
               (concat "$" (gdb--register-name register)))))))
 
      (when expression
+       (unless arg (message "Created watcher with expression %s" expression))
        (gdb-watcher-add-expression (if arg expression (cons expression nil)))
        (accept-process-output (gdb--session-process session) 0.5)
        (gdb--scroll-buffer-to-last-line (gdb--watchers-get-buffer session))))))
