@@ -1127,6 +1127,7 @@ stopped thread before running the command. If FORCE-STOPPED is
 ;; Threads buffer
 (defvar gdb-threads-mode-map
   (let ((map (make-sparse-keymap)))
+    (suppress-keymap map t)
     (define-key map (kbd "p")   #'previous-line)
     (define-key map (kbd "n")   #'next-line)
     (define-key map (kbd "SPC") #'gdb-select)
@@ -1176,6 +1177,7 @@ stopped thread before running the command. If FORCE-STOPPED is
 ;; Stack frames buffer
 (defvar gdb-frames-mode-map
   (let ((map (make-sparse-keymap)))
+    (suppress-keymap map t)
     (define-key map (kbd "p")   #'previous-line)
     (define-key map (kbd "n")   #'next-line)
     (define-key map (kbd "SPC") #'gdb-select)
@@ -1219,6 +1221,7 @@ stopped thread before running the command. If FORCE-STOPPED is
 ;; Breakpoints buffer
 (defvar gdb-breakpoints-mode-map
   (let ((map (make-sparse-keymap)))
+    (suppress-keymap map t)
     (define-key map (kbd           "p") #'previous-line)
     (define-key map (kbd           "n") #'next-line)
     (define-key map (kbd         "SPC") #'gdb-breakpoint-enable-disable)
@@ -1266,6 +1269,7 @@ stopped thread before running the command. If FORCE-STOPPED is
 ;; Variables buffer
 (defvar gdb-variables-mode-map
   (let ((map (make-sparse-keymap)))
+    (suppress-keymap map t)
     (define-key map (kbd          "p") #'previous-line)
     (define-key map (kbd          "n") #'next-line)
     (define-key map (kbd        "SPC") #'gdb-create-watcher-from)
@@ -1305,6 +1309,7 @@ stopped thread before running the command. If FORCE-STOPPED is
 ;; Watchers buffer
 (defvar gdb-watchers-mode-map
   (let ((map (make-sparse-keymap)))
+    (suppress-keymap map t)
     (define-key map (kbd        "p") #'previous-line)
     (define-key map (kbd        "n") #'next-line)
     (define-key map (kbd        "a") #'gdb-watcher-add-expression)
@@ -1393,6 +1398,7 @@ stopped thread before running the command. If FORCE-STOPPED is
 ;; Registers buffer
 (defvar gdb-registers-mode-map
   (let ((map (make-sparse-keymap)))
+    (suppress-keymap map t)
     (define-key map (kbd          "p") #'previous-line)
     (define-key map (kbd          "n") #'next-line)
     (define-key map (kbd          "f") #'gdb-registers-change-format)
@@ -1437,6 +1443,7 @@ stopped thread before running the command. If FORCE-STOPPED is
 ;; Disassembly buffer
 (defvar gdb-disassembly-mode-map
   (let ((map (make-sparse-keymap)))
+    (suppress-keymap map t)
     (define-key map (kbd "p") #'previous-line)
     (define-key map (kbd "n") #'next-line)
     (define-key map (kbd "f") #'gdb-disassembly-change-format)
