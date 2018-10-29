@@ -18,7 +18,8 @@
 #define writeGdbName(EnumKey, GdbName, ...) #GdbName
 #define writeElispStructKey(EnumKey, GdbName, EStructKey) intern(Env, ":" #EStructKey)
 
-#define enumWriter(ResultVariables) enum { ResultVariables(writeResultKey), Result_Count}
+#define enumWriterPrefix(ResultVariables, Prefix) enum { ResultVariables(writeResultKey), Prefix##_Count}
+#define enumWriter(ResultVariables) enumWriterPrefix(ResultVariables, Result)
 #define gdbNamesWriter(Name, ResultVariables) char *Name[] = { ResultVariables(writeGdbName) }
 
 typedef uint8_t  u8;
@@ -44,7 +45,7 @@ typedef struct gdbwire_mi_parser_callbacks gdbwire_callbacks;
 
 u32 plugin_is_GPL_compatible;
 
-#define internWriter(W) W(Nil, nil)                         \
+#define interns(W) W(Nil, nil)                              \
         W(T, t)                                             \
         W(Cons, cons)                                       \
         W(Car, car)                                         \
@@ -67,21 +68,21 @@ u32 plugin_is_GPL_compatible;
         W(BreakpointDeleted, gdb--breakpoint-deleted)       \
         W(AddVariablesToFrame, gdb--add-variables-to-frame) \
         W(NewWatcherInfo, gdb--new-watcher-info)            \
-        W(WatchersUpdateInfo, gdb--watchers-update-info)      \
+        W(WatchersUpdateInfo, gdb--watchers-update-info)    \
         W(WatcherAddChildren, gdb--watcher-add-children)    \
         W(WatcherFormatChange, gdb--watcher-format-change)  \
         W(SetRegisterNames, gdb--set-register-names)        \
         W(UpdateRegisters, gdb--update-registers)           \
         W(SetDisassembly, gdb--set-disassembly)             \
-        W(MakeInstruction, make-gdb--instruction)           \
-        W(MakeSourceInfo, make-gdb--source-instr-info)      \
+        W(MakeInstr, make-gdb--disassembly-instr)           \
+        W(MakeSrc, make-gdb--disassembly-src)               \
         W(PersistThread, gdb--persist-thread)
     ; // Weird indentation...
 
 #define internVariableWriter(Name, ...) static emacs_value Name;
 #define internSetterWriter(Name, ElispName) Name = intern(Env, #ElispName);
 
-internWriter(internVariableWriter);
+interns(internVariableWriter);
 
 static struct gdbwire_mi_parser *GdbMiParser;
 static mi_output *ParserOutput;
@@ -505,76 +506,81 @@ static void getChangedRegisters(emacs_env *Env, mi_result *List, emacs_value Dat
     }
 }
 
-static void disassemble(emacs_env *Env, mi_result *List, emacs_value Buffer) {
+static emacs_value instructionList(emacs_env *Env, mi_result *InstrsList) {
+    emacs_value *Args = 0;
 
-#define sourceInfoVariablesWriter(W) W(Line, line, line), W(File, fullname, file)
+#define resultKeys(W) W(Addr, address, addr),   \
+        W(Func, func-name, func),               \
+        W(Offset, offset, offset),              \
+        W(Instr, inst, instr),                  \
+        W(RawOp, opcodes, opcodes)
 
-    enum { sourceInfoVariablesWriter(writeResultKey) };
-    char *SourceVariables[] = { sourceInfoVariablesWriter(writeGdbName) };
-    emacs_value SourceInfoElispKeys[] = { sourceInfoVariablesWriter(writeElispStructKey) };
+    gdbNamesWriter(InstrKeys, resultKeys);
+    enumWriterPrefix(resultKeys, InstrKey);
+    emacs_value InstrInterns[] = {resultKeys(writeElispStructKey)};
+#undef  resultKeys
 
-#define instructionVariablesWriter(W) W(Address, address, address), \
-        W(Function, func-name, function),                           \
-        W(Offset, offset, offset),                                  \
-        W(Instruction, inst, instruction)
+    for(mi_result *Instr = InstrsList; Instr; Instr = Instr->next) {
+        char *InstrValues[InstrKey_Count] = {};
+        mi_result *InstrTuple = Instr->variant.result;
+        getBatchResultString(InstrTuple, InstrKeys, InstrValues, InstrKey_Count);
 
-    enum { instructionVariablesWriter(writeResultKey) };
-    char *InstructionVariables[] = { instructionVariablesWriter(writeGdbName) };
-    emacs_value InstructionElispKeys[] = { instructionVariablesWriter(writeElispStructKey) };
-
-    bool HasSourceInfo = !strcmp(List->variable, "src_and_asm_line");
-
-    u32 SourceInfoInstrListIndex = 3;
-    emacs_value DisassemblyList = Nil;
-
-    for(mi_result *Iterator = List; Iterator; Iterator = Iterator->next) {
-        mi_result *Contents = Iterator->variant.result;
-        if(HasSourceInfo) {
-            char *SourceValues[arrayCount(SourceVariables)] = {};
-            emacs_value SourceInfoObj;
-            getBatchResultString(Contents, SourceVariables, SourceValues, arrayCount(SourceVariables));
-
-            {
-                emacs_value Args[arrayCount(SourceVariables)*2];
-                for(int Index = 0; Index < arrayCount(SourceVariables); ++Index) {
-                    Args[Index*2] = SourceInfoElispKeys[Index];
-                    Args[Index*2 + 1] = getEmacsString(Env, SourceValues[Index]);
-                }
-                SourceInfoObj = funcall(Env, MakeSourceInfo, arrayCount(Args), Args);
-            }
-
-            mi_result *InstrList = getResultList(Contents, "line_asm_insn");
-            for(mi_result *InstrIterator = InstrList; InstrIterator; InstrIterator = InstrIterator->next) {
-                mi_result *Instruction = InstrIterator->variant.result;
-                emacs_value InstructionObj;
-
-                char *InstructionValues[arrayCount(InstructionVariables)] = {};
-                getBatchResultString(Instruction, InstructionVariables,
-                                     InstructionValues, arrayCount(InstructionVariables));
-
-                emacs_value Args[arrayCount(InstructionVariables)*2];
-                for(int Index = 0; Index < arrayCount(InstructionVariables); ++Index) {
-                    Args[Index*2] = InstructionElispKeys[Index];
-                    Args[Index*2 + 1] = getEmacsString(Env, InstructionValues[Index]);
-                }
-                InstructionObj = funcall(Env, MakeInstruction, arrayCount(Args), Args);
-
-                Env->vec_set(Env, SourceInfoObj, SourceInfoInstrListIndex,
-                             funcall(Env, Cons, 2, (emacs_value[]){InstructionObj, Env->vec_get(Env, SourceInfoObj, SourceInfoInstrListIndex)}));
-            }
-
-            {
-                emacs_value Args[2] = {SourceInfoObj, DisassemblyList};
-                DisassemblyList = funcall(Env, Cons, 2, Args);
-            }
-        } else {
-            // TODO(nox): Finish this section
-        }
+        emacs_value MakeArgs[] = {
+            InstrInterns[Result_Addr],   getEmacsString(Env, InstrValues[Result_Addr]),
+            InstrInterns[Result_Func],   getEmacsString(Env, InstrValues[Result_Func]),
+            InstrInterns[Result_Offset], getEmacsString(Env, InstrValues[Result_Offset]),
+            InstrInterns[Result_Instr],  getEmacsString(Env, InstrValues[Result_Instr]),
+            InstrInterns[Result_RawOp],  getEmacsString(Env, InstrValues[Result_RawOp])
+        };
+        bufPush(Args, funcall(Env, MakeInstr, arrayCount(MakeArgs), MakeArgs));
     }
 
-    {
-        emacs_value Args[3] = {Buffer, DisassemblyList, HasSourceInfo ? T : Nil};
-        funcall(Env, SetDisassembly, 3, Args);
+    emacs_value Result = funcall(Env, ListFunc, bufLen(Args), Args);
+    bufFree(Args);
+    return Result;
+}
+
+static void disassemble(emacs_env *Env, mi_result *List, emacs_value BuffData) {
+#define resultKeys(W) W(Line, line, line-str),                          \
+        W(File, fullname, file),                                        \
+        W(Instrs, line_asm_insn, instrs) // NOTE(nox): This is a tuple!
+
+    gdbNamesWriter(SrcKeys, resultKeys);
+    enumWriterPrefix(resultKeys, SrcKey);
+    emacs_value SrcInterns[] = {resultKeys(writeElispStructKey)};
+#undef  resultKeys
+
+    // NOTE(nox): If it has a name, then it is the tuple with the sources
+    bool HasSourceInfo = List->variable;
+    if(HasSourceInfo) {
+        emacs_value *Args = 0;
+        bufPush(Args, BuffData);
+
+        for(mi_result *Src = List; Src; Src = Src->next) {
+            char *SrcValues[SrcKey_Count-1] = {};
+            mi_result *SrcTuple = Src->variant.result;
+            getBatchResultString(SrcTuple, SrcKeys, SrcValues, arrayCount(SrcValues));
+
+            mi_result *Instrs = getResultList(SrcTuple, SrcKeys[Result_Instrs]);
+            emacs_value InstrList = instructionList(Env, Instrs);
+
+            emacs_value MakeArgs[] = {
+                SrcInterns[Result_File],   getEmacsString(Env, SrcValues[Result_File]),
+                SrcInterns[Result_Line],   getEmacsString(Env, SrcValues[Result_Line]),
+                SrcInterns[Result_Instrs], InstrList
+            };
+            bufPush(Args, funcall(Env, MakeSrc, arrayCount(MakeArgs), MakeArgs));
+        }
+
+        funcall(Env, SetDisassembly, bufLen(Args), Args);
+        bufFree(Args);
+    } else {
+        emacs_value Args[] = {
+            BuffData,
+            instructionList(Env, List)
+        };
+
+        funcall(Env, SetDisassembly, arrayCount(Args), Args);
     }
 }
 
@@ -686,6 +692,7 @@ typedef struct token_context {
         Context_Disassemble,
         Context_PersistThread,
         Context_GetData,
+        Context_IgnoreErrors,
 
         Context_Size,
     } Type;
@@ -806,6 +813,7 @@ static void handleMiResultRecord(emacs_env *Env, mi_result_record *Record, char 
         case GDBWIRE_MI_ERROR: {
             switch(Context.Type) {
                 ignoreCase(Context_InitialFile);
+                ignoreCase(Context_IgnoreErrors);
 
                 default: {
                     char *Message = getResultString(Result, "msg");
@@ -872,7 +880,7 @@ static emacs_value handleGdbMiOutput(emacs_env *Env, ptrdiff_t NumberOfArgs,
 s32 emacs_module_init(emacs_runtime *EmacsRuntime) {
     emacs_env *Env = EmacsRuntime->get_environment(EmacsRuntime);
 
-    internWriter(internSetterWriter);
+    interns(internSetterWriter);
 
     emacs_value Args[2];
     Args[0] = intern(Env, HANDLE_GDB_MI_OUTPUT_NAME);

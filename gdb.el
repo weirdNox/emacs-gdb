@@ -57,9 +57,10 @@ This can also be set to t, which means that all debug components are active.")
     gdb--context-registers-list-names ;; Data: Thread
     gdb--context-registers-get-changed ;; Data: (FormatString . Thread)
     gdb--context-registers-update ;; Data: Thread
-    gdb--context-disassemble ;; Data: Disassemble buffer
+    gdb--context-disassemble ;; Data: BufferData
     gdb--context-persist-thread
     gdb--context-get-data ;; Data: Result name string
+    gdb--context-ignore-errors
     )
   "List of implemented token contexts.
 Must be in the same order of the `token_context' enum in the
@@ -87,6 +88,7 @@ dynamic module.")
   id target-id name state frames core
   (registers-tick most-negative-fixnum) registers (registers-format "N"))
 
+(cl-defstruct gdb--variable name type value)
 (cl-defstruct gdb--frame thread level addr func file line from variables)
 
 (cl-defstruct gdb--breakpoint
@@ -101,7 +103,6 @@ dynamic module.")
 Both are strings. FLAGS are the flags to be passed to -break-insert in order to create a
 breakpoint of TYPE.")
 
-(cl-defstruct gdb--variable name type value)
 (cl-defstruct gdb--watcher  name expr type value thread parent children-count children open flag)
 
 (cl-defstruct gdb--session
@@ -113,7 +114,7 @@ breakpoint of TYPE.")
 (defvar gdb--sessions nil
   "List of active sessions.")
 
-(cl-defstruct gdb--buffer-info session type thread update-func)
+(cl-defstruct gdb--buffer-info session type thread update-func data)
 (defvar-local gdb--buffer-info nil
   "GDB related information related to each buffer.")
 (put 'gdb--buffer-info 'permanent-local t)
@@ -127,12 +128,14 @@ This is shared among all sessions.")
 The alist has the format ((TOKEN . (TYPE . DATA)) ...).
 This is shared among all sessions.")
 
-(cl-defstruct gdb--instruction address function offset instruction)
-(cl-defstruct gdb--source-instr-info file line instr-list)
+(cl-defstruct gdb--disassembly-instr addr func offset instr opcodes)
+(cl-defstruct gdb--disassembly-src   file line-str    instrs)
+(cl-defstruct gdb--disassembly-data (mode 4) func list new)
 
 (defvar gdb--inhibit-display-source nil)
 (defvar gdb--open-buffer-new-frame  nil)
 (defvar gdb--data nil)
+
 
 ;; ------------------------------------------------------------------------------------------
 ;; Faces and bitmaps
@@ -150,20 +153,66 @@ This is shared among all sessions.")
     (t :background "gray"))
   "Face for disabled breakpoint icon in fringe.")
 
-;; (defconst gdb--disassembly-font-lock-keywords
-;;   '(;; 0xNNNNNNNN opcode
-;;     ("^0x[[:xdigit:]]+[[:space:]]+\\(\\sw+\\)"
-;;      (1 font-lock-keyword-face))
-;;     ;; Hexadecimals
-;;     ("0x[[:xdigit:]]+" . font-lock-constant-face)
-;;     ;; Source lines
-;;     ("^Line.*$" . font-lock-comment-face)
-;;     ;; %register(at least i386)
-;;     ("%\\sw+" . font-lock-variable-name-face)
-;;     ;; <FunctionName+Number>
-;;     ("<\\([^()[:space:]+]+\\)\\(([^>+]*)\\)?\\(\\+[0-9]+\\)?>"
-;;      (1 font-lock-function-name-face)))
-;;   "Font lock keywords used in `gdb--disassembly'.")
+
+;; ------------------------------------------------------------------------------------------
+;; Fringe symbols
+(defun gdb--place-symbol (session buffer line data)
+  (when (and (buffer-live-p buffer) line data)
+    (with-current-buffer buffer
+      (let* ((type (alist-get 'type data))
+             (pos (line-beginning-position (1+ (- line (line-number-at-pos)))))
+             (overlay (make-overlay pos pos buffer))
+             (dummy-string (make-string 1 ?x))
+             property)
+        ;; NOTE(nox): Properties for housekeeping, session and type of symbol
+        (overlay-put overlay 'gdb--session session)
+        (overlay-put overlay 'gdb--type    type)
+
+        ;; NOTE(nox): Fringe spec: (left-fringe BITMAP [FACE])
+        ;;            Margin spec: ((margin left-margin) STRING)
+        (cond
+         ((eq type 'breakpoint-indicator)
+          (let ((breakpoint (alist-get 'breakpoint data))
+                (enabled    (alist-get 'enabled    data)))
+            (setf (gdb--breakpoint-overlay breakpoint) overlay)
+            (overlay-put overlay 'gdb--breakpoint breakpoint)
+
+            (if (display-images-p)
+                (setq property `(left-fringe gdb--fringe-breakpoint
+                                             ,(if enabled 'gdb--breakpoint-enabled 'gdb--breakpoint-disabled)))
+              (setq property `((margin left-margin) ,(if enabled "B" "b"))))))
+
+         ((memq type '(source-indicator frame-indicator thread-indicator disassembly-indicator))
+          (overlay-put overlay 'priority 10) ;; NOTE(nox): Above breakpoint symbols
+          (if (display-images-p)
+              (setq property '(left-fringe right-triangle compilation-warning))
+            (setq property '((margin left-margin) "=>")))))
+
+        (put-text-property 0 1 'display property dummy-string)
+        (overlay-put overlay 'before-string dummy-string)
+
+        (when (memq type '(source-indicator breakpoint-indicator))
+          (overlay-put overlay 'window (gdb--session-source-window session)))))))
+
+(defsubst gdb--remove-symbols-in-curr-buffer (type)
+  (remove-overlays nil nil 'gdb--type type))
+
+(defun gdb--remove-all-symbols (session type &optional source-files-only)
+  "Remove all symbols from SESSION, with type TYPE.
+When SOURCE-FILES-ONLY is non-nil, only remove them from buffer
+that are not created by GDB."
+  (dolist (buffer (buffer-list))
+    (with-current-buffer buffer
+      (unless (and source-files-only gdb--buffer-info)
+        (dolist (ov (overlays-in (point-min) (point-max)))
+          (when (and (eq session (overlay-get ov 'gdb--session))
+                     (or (memq type (list 'all (overlay-get ov 'gdb--type)))))
+            (delete-overlay ov)))))))
+
+(defun gdb--breakpoint-remove-symbol (breakpoint)
+  (let ((overlay (gdb--breakpoint-overlay breakpoint)))
+    (when overlay (delete-overlay overlay))))
+
 
 ;; ------------------------------------------------------------------------------------------
 ;; Session management
@@ -247,6 +296,16 @@ This is shared among all sessions.")
      (cl-loop for thread in (gdb--session-threads session)
               when (= (gdb--thread-id thread) id) return thread))))
 
+(defun gdb--best-frame-to-switch-to (thread)
+  "Return the most relevant frame to switch to in THREAD's frames."
+  (when thread
+    (let ((fallback (car (gdb--thread-frames thread)))
+          runner-up)
+      (or (cl-loop for frame in (gdb--thread-frames thread)
+                   when (and (gdb--frame-file frame) (gdb--frame-line frame)) return frame
+                   when (gdb--frame-file frame) do (setq runner-up frame))
+          runner-up fallback))))
+
 (defun gdb--switch-to-thread (thread &optional auto)
   "Unconditionally switch to _different_ THREAD. This will also switch to the most relevant frame.
 THREAD may be nil, which means to remove the selected THREAD."
@@ -258,55 +317,50 @@ THREAD may be nil, which means to remove the selected THREAD."
      (let ((buffer (gdb--get-buffer-with-type session 'gdb--threads)) pos)
        (when buffer
          (with-current-buffer buffer
-           (remove-overlays nil nil 'gdb--thread-indicator t)
+           (gdb--remove-symbols-in-curr-buffer 'thread-indicator)
            (when thread
              (when (setq pos (text-property-any (point-min) (point-max) 'gdb--thread thread))
                (gdb--place-symbol session (current-buffer) (line-number-at-pos pos)
                                   '((type . thread-indicator))))))))
 
      (when thread
-       (gdb--command (format "-thread-select %d" (gdb--thread-id thread)))
+       (gdb--command (format "-thread-select %d" (gdb--thread-id thread)) 'gdb--context-ignore-errors)
        (message "Switched to thread %d." (gdb--thread-id thread)))
 
      (cl-pushnew 'gdb--frames    (gdb--session-buffer-types-to-update session))
      (cl-pushnew 'gdb--registers (gdb--session-buffer-types-to-update session)))))
 
-(defun gdb--best-frame-to-switch-to (thread)
-  "Return the most relevant frame to switch to in THREAD's frames."
-  (when thread
-    (let ((fallback (car (gdb--thread-frames thread)))
-          runner-up)
-      (or (cl-loop for frame in (gdb--thread-frames thread)
-                   when (and (gdb--frame-file frame) (gdb--frame-line frame)) return frame
-                   when (gdb--frame-file frame) do (setq runner-up frame))
-          runner-up fallback))))
-
 (defun gdb--switch-to-frame (frame &optional auto)
   "Unconditionally switch to a _different_ FRAME.
-When FRAME is in a different thread, switch to it."
+When FRAME is in a different thread, switch to it.
+When FRAME is `deselect-frame', then deselect the current frame but keep the selected thread."
   (gdb--with-valid-session
-   (unless (eq frame (gdb--session-selected-frame session))
-     (setf (gdb--session-selected-frame session) frame)
+   (let ((keep-thread (eq frame 'deselect-frame)))
+     (setq frame (if keep-thread nil frame))
 
-     (when frame
-       (gdb--switch-to-thread (gdb--frame-thread frame) auto)
-       (gdb--command (format "-stack-select-frame %d" (gdb--frame-level frame)))
-       (gdb--command "-var-update --all-values *" (cons 'gdb--context-watcher-update auto) frame))
+     (unless (eq frame (gdb--session-selected-frame session))
+       (setf (gdb--session-selected-frame session) frame)
+       (unless keep-thread (gdb--switch-to-thread (and frame (gdb--frame-thread frame)) auto))
 
-     (if (and frame (not (gdb--frame-variables frame)))
-         (gdb--command "-stack-list-variables --simple-values" (cons 'gdb--context-get-variables frame) frame)
-       (cl-pushnew 'gdb--variables (gdb--session-buffer-types-to-update session)))
+       (when frame
+         (gdb--command (format "-stack-select-frame %d" (gdb--frame-level frame)))
+         (gdb--command "-var-update --all-values *" (cons 'gdb--context-watcher-update auto) frame))
 
-     (gdb--display-source-buffer)
+       (if (and frame (not (gdb--frame-variables frame)))
+           (gdb--command "-stack-list-variables --simple-values" (cons 'gdb--context-get-variables frame) frame)
+         (cl-pushnew 'gdb--variables (gdb--session-buffer-types-to-update session)))
 
-     (let ((buffer (gdb--get-buffer-with-type session 'gdb--frames)) pos)
-       (when buffer
-         (with-current-buffer buffer
-           (remove-overlays nil nil 'gdb--frame-indicator t)
-           (when frame
-             (when (setq pos (text-property-any (point-min) (point-max) 'gdb--frame frame))
-               (gdb--place-symbol session (current-buffer) (line-number-at-pos pos)
-                                  '((type . frame-indicator)))))))))))
+       (gdb--disassembly-fetch frame)
+       (gdb--display-source-buffer)
+
+       (let ((buffer (gdb--get-buffer-with-type session 'gdb--frames)) pos)
+         (when buffer
+           (with-current-buffer buffer
+             (gdb--remove-symbols-in-curr-buffer 'frame-indicator)
+             (when frame
+               (when (setq pos (text-property-any (point-min) (point-max) 'gdb--frame frame))
+                 (gdb--place-symbol session (current-buffer) (line-number-at-pos pos)
+                                    '((type . frame-indicator))))))))))))
 
 (defun gdb--switch (frame-or-thread)
   "Unconditionally switch to a _different_ FRAME-OR-THREAD."
@@ -405,6 +459,19 @@ All embedded quotes, newlines, and backslashes are preceded with a backslash."
                    (beginning-of-line)
                    (1+ (count-lines 1 (point)))))
 
+(defun gdb--get-line (path line &optional trim)
+  (when (and path line (> line 0))
+    (let ((buffer (gdb--find-file path)))
+      (when buffer
+        (with-current-buffer buffer
+          (save-excursion
+            (goto-char (point-min))
+            (forward-line (1- line))
+            (let ((string (thing-at-point 'line)))
+              (if trim
+                  (replace-regexp-in-string "\\(\\`[[:space:]\n]*\\|[[:space:]\n]*\\'\\)" "" string)
+                string))))))))
+
 (defsubst gdb--stn (str) (and (stringp str) (string-to-number str)))
 (defsubst gdb--nts (num) (and (numberp num) (number-to-string num)))
 (defsubst gdb--add-face (string face) (when string (propertize string 'face face)))
@@ -452,6 +519,9 @@ ARGS-TO-COMMAND are passed to `gdb--command', after the context."
    (apply 'gdb--command command (cons 'gdb--context-get-data key) args-to-command)
    (while (not gdb--data) (accept-process-output (gdb--session-process session) 0.5))
    (when (stringp gdb--data) gdb--data)))
+
+(defsubst gdb--parse-address (addr-str)
+  (and addr-str (string-to-number (substring addr-str 2) 16)))
 
 
 ;; ------------------------------------------------------------------------------------------
@@ -554,7 +624,7 @@ If WITH-HEADER is set, then the first row is used as header."
           (target-line (gdb--table-target-line table)))
       (when start-line
         (gdb--scroll-buffer-to-last-line buffer)
-        (gdb--scroll-buffer-to-line buffer (+ start-line scroll-margin) t))
+        (gdb--scroll-buffer-to-line buffer (+ start-line scroll-margin) 'top))
 
       (when target-line
         (gdb--scroll-buffer-to-line buffer target-line)))))
@@ -577,15 +647,15 @@ If WITH-HEADER is set, then the first row is used as header."
      ,(concat "Creator and fetcher of buffer with type `" (symbol-name type) "'")
      (cond ((gdb--get-buffer-with-type session ',type))
            (t (let ((buffer (generate-new-buffer "*GDB Temporary Name*")))
+                (push buffer (gdb--session-buffers session))
                 (with-current-buffer buffer
                   (gdb--rename-buffer ,name (gdb--session-debuggee-path session))
-                  ,@body
                   (setq gdb--buffer-info (make-gdb--buffer-info :session session :type ',type
                                                                 :update-func #',update-func))
+                  ,@body
                   ,(if important
                        '(add-hook 'kill-buffer-hook #'gdb--important-buffer-kill-cleanup nil t)
                      '(add-hook 'kill-buffer-hook #'gdb--buffer-kill-cleanup nil t)))
-                (push buffer (gdb--session-buffers session))
                 (gdb--update-buffer buffer)
                 buffer)))))
 
@@ -634,23 +704,40 @@ If WITH-HEADER is set, then the first row is used as header."
 (defsubst gdb--is-buffer-type (type)
   (and gdb--buffer-info (eq (gdb--buffer-info-type gdb--buffer-info) type)))
 
+(defmacro gdb--buffer-get-data (&optional buffer)
+  (if buffer
+      `(let ((buffer ,buffer) info)
+         (when buffer
+           (setq info (buffer-local-value 'gdb--buffer-info buffer))
+           (and  info (gdb--buffer-info-data info))))
+    `(and gdb--buffer-info (gdb--buffer-info-data gdb--buffer-info))))
+
 
 ;; ------------------------------------------------------------------------------------------
 ;; Frames and windows
-(defun gdb--frame-name (session)
-  "Return GDB frame name for SESSION, possibly using debuggee file name."
-  (let* ((debuggee (gdb--session-debuggee-path session))
+(defun gdb--rename-frame (frame)
+  "Rename FRAME, possibly using debuggee file name and buffer type."
+  (let* ((session (frame-parameter frame 'gdb--session))
+         (is-main (eq frame (gdb--session-frame session)))
+         (prefix (or (and (not is-main)
+                          (cl-loop for window in (window-list frame)
+                                   for buffer = (window-buffer window)
+                                   when (and (buffer-local-value 'gdb--buffer-info buffer)
+                                             (window-dedicated-p window))
+                                   return (buffer-local-value 'mode-name buffer)))
+                     "GDB"))
+         (debuggee (gdb--session-debuggee-path session))
          (suffix (and (stringp debuggee)
                       (file-executable-p debuggee)
                       (concat " - " (abbreviate-file-name debuggee)))))
-    (concat "Emacs GDB" suffix)))
+    (set-frame-parameter frame 'name (concat prefix suffix))))
 
 (defun gdb--create-frame (session)
   (let ((frame (make-frame `((fullscreen . maximized)
-                             (gdb--session . ,session)
-                             (name . ,(gdb--frame-name session))))))
+                             (gdb--session . ,session)))))
     (setf (gdb--session-frame session) frame)
     (add-hook 'delete-frame-functions #'gdb--handle-delete-frame)
+    (gdb--rename-frame frame)
     frame))
 
 (defun gdb--handle-delete-frame (frame)
@@ -682,7 +769,7 @@ If WITH-HEADER is set, then the first row is used as header."
       (gdb--set-window-buffer bottom-right (gdb--variables-get-buffer session))
       (setf (gdb--session-source-window session) top-left))))
 
-(defun gdb--scroll-buffer-to-line (buffer line &optional top)
+(defun gdb--scroll-buffer-to-line (buffer line &optional where)
   (with-current-buffer buffer
     (goto-char (point-min))
     (forward-line (1- line)))
@@ -691,7 +778,9 @@ If WITH-HEADER is set, then the first row is used as header."
     (with-selected-window window
       (goto-char (point-min))
       (forward-line (1- line))
-      (when top (recenter 0)))))
+      (cond
+       ((eq where 'top)    (recenter 0))
+       ((eq where 'center) (recenter))))))
 
 (defun gdb--scroll-buffer-to-last-line (buffer)
   (with-current-buffer buffer
@@ -930,7 +1019,7 @@ stopped thread before running the command. If FORCE-STOPPED is
          (when (eq selected-thread thread) (setq selected-thread-line (gdb--table-num-rows table)))
          (when (eq cursor-on-thread thread) (setf (gdb--table-target-line table) (gdb--table-num-rows table)))))
 
-     (remove-overlays nil nil 'gdb--thread-indicator t)
+     (gdb--remove-symbols-in-curr-buffer 'thread-indicator)
      (gdb--table-insert table)
 
      (when selected-thread-line
@@ -973,7 +1062,7 @@ stopped thread before running the command. If FORCE-STOPPED is
          (when (eq selected-frame frame) (setq selected-frame-line (gdb--table-num-rows table)))
          (when (eq cursor-on-frame frame) (setf (gdb--table-target-line table) (gdb--table-num-rows table)))))
 
-     (remove-overlays nil nil 'gdb--frame-indicator t)
+     (gdb--remove-symbols-in-curr-buffer 'frame-indicator)
      (gdb--table-insert table)
 
      (when selected-frame-line
@@ -1186,6 +1275,122 @@ stopped thread before running the command. If FORCE-STOPPED is
                       (list 'gdb--register reg))))
      (gdb--table-insert table))))
 
+
+;; ------------------------------------------------------------------------------------------
+;; Disassembly buffer
+(defvar gdb-disassembly-mode-map
+  (let ((map (make-sparse-keymap)))
+    (define-key map (kbd          "p") #'previous-line)
+    (define-key map (kbd          "n") #'next-line)
+    map))
+
+(defconst gdb--disassembly-font-lock-keywords
+  '(;; 0xNNNNNNNN opcode
+    ("^0x[[:xdigit:]]+[[:space:]]+\\(\\sw+\\)" (1 font-lock-keyword-face))
+    ;; Hexadecimals
+    ("0x[[:xdigit:]]+" . font-lock-constant-face)
+    ;; Source lines
+    ("^Line.*$" . font-lock-comment-face)
+    ;; %register(at least i386)
+    ("%\\sw+" . font-lock-variable-name-face)
+    ;; <FunctionName+Number>
+    ("<\\([^()[:space:]+]+\\)\\(([^>+]*)\\)?\\(\\+[0-9]+\\)?>" (1 font-lock-function-name-face)))
+  "Font lock keywords used in `gdb--disassembly'.")
+
+(define-derived-mode gdb-disassembly-mode nil "GDB Disassembly"
+  (setq-local font-lock-defaults '(gdb--disassembly-font-lock-keywords t))
+  (setq-local buffer-read-only t)
+  (buffer-disable-undo))
+
+(gdb--simple-get-buffer gdb--disassembly gdb--disassembly-update "Disassembly" nil
+  (gdb-disassembly-mode)
+  (setf (gdb--buffer-info-data gdb--buffer-info) (make-gdb--disassembly-data))
+  (gdb--disassembly-fetch (gdb--session-selected-frame session)))
+
+(defun gdb--disassembly-fetch (frame)
+  (gdb--with-valid-session
+   (let ((data (gdb--buffer-get-data (gdb--get-buffer-with-type session 'gdb--disassembly))))
+     (when data
+       (cond
+        (frame
+         (let ((func (gdb--frame-func frame))
+               (file (gdb--frame-file frame))
+               (line (gdb--frame-line frame)))
+           (cond
+            ((and func file line)
+             (if (string= (gdb--disassembly-data-func data) func)
+                 (cl-pushnew 'gdb--disassembly (gdb--session-buffer-types-to-update session))
+               (setf (gdb--disassembly-data-func data) func)
+               (gdb--command (format "-data-disassemble -f %s -l %d -- %d" (gdb--escape-argument file) line
+                                     (gdb--disassembly-data-mode data))
+                             (cons 'gdb--context-disassemble data))))
+            (t
+             (gdb--command (format "-data-disassemble -s $pc -e $pc+500 -- %d" (gdb--disassembly-data-mode data))
+                           (cons 'gdb--context-disassemble data) frame)))))
+
+        (t (setf (gdb--disassembly-data-func data) nil
+                 (gdb--disassembly-data-list data) nil
+                 (gdb--disassembly-data-new  data) t)
+           (cl-pushnew 'gdb--disassembly (gdb--session-buffer-types-to-update session))))))))
+
+(defun gdb--disassembly-print-instrs (list current-addr-num target-ref)
+  (cl-loop for instr in list
+           for addr       = (gdb--disassembly-instr-addr   instr)
+           for addr-num   = (gdb--parse-address addr)
+           for instr-text = (gdb--disassembly-instr-instr  instr)
+           for func       = (gdb--disassembly-instr-func   instr)
+           for offset     = (gdb--disassembly-instr-offset instr)
+           when (= addr-num current-addr-num) do (setf (gv-deref target-ref) (gdb--current-line))
+           do (insert (propertize
+                       (format "%-20s %-50s %s\n"
+                               addr instr-text
+                               (cond ((and func offset) (concat "<" func "+" offset ">"))
+                                     (func              (concat "<" func ">"))
+                                     (t "")))
+                       'gdb--instr instr
+                       'gdb--addr-num addr-num))))
+
+(defun gdb--disassembly-update ()
+  (gdb--with-valid-session
+   (let* ((data (gdb--buffer-get-data))
+          (list (gdb--disassembly-data-list data))
+          (with-source (eq (type-of (car list)) 'gdb--disassembly-src))
+          (frame (gdb--session-selected-frame session))
+          (current-addr-num (or (and frame (gdb--parse-address (gdb--frame-addr frame))) -1))
+          target (target-ref (gv-ref target)))
+     (gdb--remove-symbols-in-curr-buffer 'disassembly-indicator)
+
+     (cond
+      ((gdb--disassembly-data-new data)
+       (setf (gdb--disassembly-data-new data) nil)
+       (erase-buffer)
+
+       (if with-source
+           (cl-loop for src in list
+                    for file = (gdb--complete-path (gdb--disassembly-src-file src))
+                    for line-str = (gdb--disassembly-src-line-str src)
+                    for line-contents = (gdb--get-line file (gdb--stn line-str) t)
+                    for instrs = (gdb--disassembly-src-instrs src)
+                    do  (when line-str (insert (format "Line %-15s %s\n" line-str (or line-contents ""))))
+                    do  (gdb--disassembly-print-instrs instrs current-addr-num target-ref))
+         (gdb--disassembly-print-instrs list current-addr-num target-ref))
+
+       (cond
+        (target
+         (gdb--place-symbol session  (current-buffer) target '((type . disassembly-indicator)))
+         (gdb--scroll-buffer-to-line (current-buffer) target 'center))
+
+        (t (gdb--scroll-buffer-to-line (current-buffer) 1))))
+
+      (t
+       (let ((pos (text-property-any (point-min) (point-max) 'gdb--addr-num current-addr-num))
+             line)
+         (when pos
+           (setq line (gdb--current-line pos))
+           (gdb--place-symbol session  (current-buffer) line '((type . disassembly-indicator)))
+           (gdb--scroll-buffer-to-line (current-buffer) line 'center))))))))
+
+
 ;; ------------------------------------------------------------------------------------------
 ;; Source buffers
 (defun gdb--find-file (path)
@@ -1206,7 +1411,7 @@ The source file and line are fetched from the selected frame, unless OVERRIDE-FI
 in which case those will be used.
 OVERRIDE-LINE may also be `no-mark', which forces it to not mark any line."
   (gdb--with-valid-session
-   (gdb--remove-all-symbols session 'gdb--source-indicator t)
+   (gdb--remove-all-symbols session 'source-indicator t)
 
    (let* ((frame (gdb--session-selected-frame session))
           (file (cond (override-file)
@@ -1217,18 +1422,16 @@ OVERRIDE-LINE may also be `no-mark', which forces it to not mark any line."
           (window (gdb--session-source-window session)))
 
      (unless (window-valid-p window)
-       (let ((new-frame (make-frame `((gdb--session . ,session)
-                                      (name . ,(gdb--frame-name session))
-                                      (unsplittable . t)))))
+       (let ((new-frame (make-frame `((gdb--session . ,session)))))
          (x-focus-frame new-frame)
          (setq window (setf (gdb--session-source-window session) (frame-first-window new-frame)))
-         (set-window-buffer window (gdb--comint-get-buffer session))))
+         (set-window-buffer window (gdb--comint-get-buffer session))
+         (gdb--rename-frame new-frame)))
 
      (when (and (not gdb--inhibit-display-source) buffer)
+       (set-window-dedicated-p window nil)
+       (set-window-buffer window buffer)
        (with-selected-window window
-         (set-window-dedicated-p window nil)
-         (switch-to-buffer buffer)
-
          (if (display-images-p)
              (set-window-fringes nil 8)
            (set-window-margins nil 2))
@@ -1239,59 +1442,6 @@ OVERRIDE-LINE may also be `no-mark', which forces it to not mark any line."
            (recenter)))
 
        (gdb--place-symbol session buffer line '((type . source-indicator)))))))
-
-
-;; ------------------------------------------------------------------------------------------
-;; Fringe symbols
-(defun gdb--place-symbol (session buffer line data)
-  (when (and (buffer-live-p buffer) line data)
-    (with-current-buffer buffer
-      (let* ((type (alist-get 'type data))
-             (pos (line-beginning-position (1+ (- line (line-number-at-pos)))))
-             (overlay (make-overlay pos pos buffer))
-             (dummy-string (make-string 1 ?x))
-             property)
-        ;; NOTE(nox): Properties for housekeeping, session and type of symbol
-        (overlay-put overlay 'gdb--indicator-session session)
-        (overlay-put overlay (intern (concat "gdb--" (symbol-name type))) t)
-
-        ;; NOTE(nox): Fringe spec: (left-fringe BITMAP [FACE])
-        ;;            Margin spec: ((margin left-margin) STRING)
-        (cond
-         ((eq type 'breakpoint-indicator)
-          (let ((breakpoint (alist-get 'breakpoint data))
-                (enabled    (alist-get 'enabled    data)))
-            (setf (gdb--breakpoint-overlay breakpoint) overlay)
-            (overlay-put overlay 'gdb--breakpoint breakpoint)
-
-            (if (display-images-p)
-                (setq property `(left-fringe gdb--fringe-breakpoint
-                                             ,(if enabled 'gdb--breakpoint-enabled 'gdb--breakpoint-disabled)))
-              (setq property `((margin left-margin) ,(if enabled "B" "b"))))))
-
-         ((memq type '(source-indicator frame-indicator thread-indicator))
-          (overlay-put overlay 'priority 10) ;; NOTE(nox): Above breakpoint symbols
-          (if (display-images-p)
-              (setq property '(left-fringe right-triangle compilation-warning))
-            (setq property '((margin left-margin) "=>")))))
-
-        (put-text-property 0 1 'display property dummy-string)
-        (overlay-put overlay 'before-string dummy-string)
-
-        (when (eq type 'source-indicator) (overlay-put overlay 'window (gdb--session-source-window session)))))))
-
-(defun gdb--remove-all-symbols (session type &optional source-files-only)
-  (dolist (buffer (buffer-list))
-    (with-current-buffer buffer
-      (unless (and source-files-only gdb--buffer-info)
-        (dolist (ov (overlays-in (point-min) (point-max)))
-          (when (and (eq session (overlay-get ov 'gdb--indicator-session))
-                     (or (eq type 'all) (overlay-get ov type)))
-            (delete-overlay ov)))))))
-
-(defun gdb--breakpoint-remove-symbol (breakpoint)
-  (let ((overlay (gdb--breakpoint-overlay breakpoint)))
-    (when overlay (delete-overlay overlay))))
 
 
 ;; ------------------------------------------------------------------------------------------
@@ -1325,11 +1475,11 @@ it from the list."
              (gdb--thread-frames thread) nil)
 
        (when (eq thread selected-thread)
-         (gdb--remove-all-symbols session 'gdb--source-indicator t)
+         (gdb--remove-all-symbols session 'source-indicator t)
          (unless (gdb--session-persist-thread session)
            (cl-loop for thread in (gdb--session-threads session)
-                    when (string= (gdb--thread-state thread) "stopped")
-                    do (gdb--switch-to-thread thread) and return nil))
+                    when (string= (gdb--thread-state thread) "stopped") return (gdb--switch-to-thread thread)
+                    finally (gdb--switch-to-frame 'deselect-frame t)))
          (setf (gdb--session-persist-thread session) nil))
 
        (cl-pushnew 'gdb--threads (gdb--session-buffer-types-to-update session))
@@ -1348,6 +1498,8 @@ it from the list."
 
      (when (eq (gdb--session-selected-thread session) thread)
        (gdb--switch-to-thread (car (gdb--session-threads session))))
+
+     (unless (gdb--session-threads session) (gdb--remove-all-symbols session 'all))
 
      (cl-pushnew 'gdb--threads (gdb--session-buffer-types-to-update session)))))
 
@@ -1536,12 +1688,14 @@ it from the list."
                                 (gdb--register-tick  reg) tick))
      (cl-pushnew 'gdb--registers (gdb--session-buffer-types-to-update session)))))
 
-;; (defun gdb--set-disassembly (buffer list with-source-info)
-;;   (when (buffer-live-p buffer)
-;;     (with-current-buffer buffer
-;;       (setq-local gdb--disassembly-list list)
-;;       (setq-local gdb--with-source-info with-source-info))
-;;     (add-to-list 'gdb--buffers-to-update buffer)))
+(defun gdb--set-disassembly (data &rest args)
+  (gdb--with-valid-session
+   (if (gdb--disassembly-src-p (car args))
+       (setf (gdb--disassembly-data-list data) args)
+     (setf (gdb--disassembly-data-list data) (car args)))
+
+   (setf (gdb--disassembly-data-new data) t)
+   (cl-pushnew 'gdb--disassembly (gdb--session-buffer-types-to-update session))))
 
 (defun gdb--persist-thread ()
   (gdb--with-valid-session (setf (gdb--session-persist-thread session) t)))
@@ -1615,7 +1769,7 @@ it from the list."
        (gdb--command (format "-var-assign %s %s"
                              (gdb--watcher-name watcher)
                              (gdb--escape-argument (gdb--read-line "Value: " (gdb--watcher-value watcher)))))
-       (gdb--command "-var-update --all-values *" (cons 'gdb--context-watcher-update auto) frame)))))
+       (gdb--command "-var-update --all-values *" (cons 'gdb--context-watcher-update t) frame)))))
 
 (defun gdb-watcher-edit-expression ()
   (interactive)
@@ -1836,14 +1990,20 @@ If ADVANCE is nil, then only run until code inside the same frame."
    (let ((buffer (funcall buffer-fun session))
          (window (selected-window)))
      (if gdb--open-buffer-new-frame
-         (let ((frame (make-frame `((gdb--session . ,session)
-                                    (name . ,(gdb--frame-name session))
-                                    (unsplittable . t)))))
+         (let ((frame (make-frame `((gdb--session . ,session)))))
            (x-focus-frame frame)
            (setq window (frame-first-window frame)))
+
        (when (eq window (gdb--session-source-window session))
          (setf (gdb--session-source-window session) nil)))
-     (gdb--set-window-buffer window buffer))))
+
+     (let ((frame (window-frame window)))
+       (unless (eq (frame-parameter frame 'gdb--session) session)
+         (user-error "This frame does not belong to GDB"))
+
+       (gdb--set-window-buffer window buffer)
+       (unless (eq frame (gdb--session-frame session))
+         (gdb--rename-frame frame))))))
 
 (defhydra gdb-switch-buffer
   (:hint nil :foreign-keys warn :exit t :body-pre (gdb--with-valid-session
@@ -1852,19 +2012,21 @@ If ADVANCE is nil, then only run until code inside the same frame."
   "
 Show GDB buffer in %s(if gdb--open-buffer-new-frame \"new frame\" \"selected window\") [_<f12>_]
 _g_db shell     |  _t_hreads  |  _b_reakpoints  |  _v_ariables  |  _r_egisters | _s_ource buffer
-_i_nferior i/o  |  _f_rames   |  ^ ^            |  _w_atcher    |  ^ ^         |
+_i_nferior i/o  |  _f_rames   |  _d_isassembly  |  _w_atcher    |  ^ ^         |
 "
   ("g" (gdb--switch-buffer 'gdb--comint-get-buffer))
   ("i" (gdb--switch-buffer 'gdb--inferior-io-get-buffer))
   ("t" (gdb--switch-buffer 'gdb--threads-get-buffer))
   ("f" (gdb--switch-buffer 'gdb--frames-get-buffer))
   ("b" (gdb--switch-buffer 'gdb--breakpoints-get-buffer))
+  ("d" (gdb--switch-buffer 'gdb--disassembly-get-buffer))
   ("v" (gdb--switch-buffer 'gdb--variables-get-buffer))
   ("w" (gdb--switch-buffer 'gdb--watchers-get-buffer))
   ("r" (gdb--switch-buffer 'gdb--registers-get-buffer))
-  ("s" (progn (setf (gdb--session-source-window (gdb--infer-session))
-                    (unless gdb--open-buffer-new-frame (selected-window)))
-              (gdb--display-source-buffer)))
+  ("s" (progn (setf (gdb--session-source-window (gdb--infer-session)) (and (not gdb--open-buffer-new-frame)
+                                                                           (selected-window)))
+              (gdb--display-source-buffer)
+              (gdb--rename-frame (selected-frame))))
   ("<f12>" (setq gdb--open-buffer-new-frame (not gdb--open-buffer-new-frame)) :exit nil))
 
 (defun gdb-toggle-breakpoint (&optional arg)
@@ -1980,8 +2142,11 @@ If ARG is `dprintf' create a dprintf breakpoint instead."
     (with-selected-frame (gdb--session-frame session)
       (gdb--command (concat "-file-exec-and-symbols " debuggee-path))
       (gdb--command "-file-list-exec-source-file" 'gdb--context-initial-file)
-      (set-frame-parameter nil 'name (gdb--frame-name session))
-      (gdb--rename-buffers-with-debuggee debuggee-path))))
+      (gdb--rename-buffers-with-debuggee debuggee-path))
+
+    (cl-loop for frame in (frame-list)
+             when (eq (frame-parameter frame 'gdb--session) session)
+             do (gdb--rename-frame frame))))
 
 (provide 'gdb)
 ;;; gdb.el ends here
