@@ -1,10 +1,12 @@
-;;; gdb.el --- GDB frontend -*- lexical-binding: t; -*-
+;;; gdb-mi.el --- GDB Graphical Interface -*- lexical-binding: t; -*-
 
 ;; Copyright (C) 2017-2018  Gonçalo Santos
 
 ;; Author: Gonçalo Santos (aka. weirdNox)
-;; Keywords: lisp gdb
-;; Version: 0.0.1
+;; Homepage: https://github.com/weirdNox/emacs-gdb
+;; Keywords: lisp gdb gdb-mi debugger graphical interface
+;; Package-Requires: ((emacs "26.1") (cl-lib "1.0") (hydra "0.14.0"))
+;; Version: 0.1
 
 ;; This program is free software; you can redistribute it and/or modify
 ;; it under the terms of the GNU General Public License as published by
@@ -19,10 +21,28 @@
 ;; You should have received a copy of the GNU General Public License
 ;; along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
+;;; Commentary:
+
+;; This package provides a graphical user interface to GDB.
+
 ;;; Code:
+;; ------------------------------------------------------------------------------------------
+;; Load packages
 (require 'cl-lib)
 (require 'comint)
-(require 'gdb-module (concat default-directory "gdb-module" module-file-suffix))
+(require 'hydra)
+
+(eval-and-compile
+  (let* ((default-directory (file-name-directory (or load-file-name default-directory)))
+         (required-module (concat "gdb-module" module-file-suffix)))
+    (if (file-exists-p required-module)
+        (require 'gdb-module required-module)
+      (with-current-buffer (compile (concat "make -k " required-module))
+        (add-hook 'compilation-finish-functions
+                  (lambda (_buffer _status) (require 'gdb-module required-module)) nil t)))))
+
+(declare-function gdb--handle-mi-output "ext:gdb-module")
+
 
 ;; ------------------------------------------------------------------------------------------
 ;; User configurable variables
@@ -117,7 +137,7 @@ This can also be set to t, which means that all debug components are active."
   :group 'gdb
   :version "26.1")
 
-(eval-when-compile
+(eval-and-compile
   (defface gdb-running-face '((t :inherit font-lock-string-face))
     "Face for highlighting the \"running\" keyword."
     :group 'gdb
@@ -247,6 +267,193 @@ This is shared among all sessions.")
 
 
 ;; ------------------------------------------------------------------------------------------
+;; Utilities
+(defun gdb--debug-check (arg)
+  "Check if debug ARG is enabled.
+Type may be a symbol or a list of symbols and are checked against `gdb-debug'."
+  (or (eq gdb-debug t)
+      (and (listp arg) (cl-loop for type in arg when (memq type gdb-debug) return t))
+      (and (symbolp arg) (memq arg gdb-debug))))
+
+(defmacro gdb--debug-execute-body (debug-symbol &rest body)
+  "Execute body when DEBUG-SYMBOL is in `gdb-debug'.
+DEBUG-SYMBOL may be a symbol or a list of symbols."
+  (declare (indent defun))
+  `(when (gdb--debug-check ,debug-symbol) (progn ,@body)))
+
+(defun gdb--read-line (prompt &optional default)
+  "Read a line of user input with PROMPT and DEFAULT value.
+The string is trimmed and all the spaces (including newlines) are converted into a single space."
+  (let ((result (replace-regexp-in-string
+                 "\\(\\`[ \t\r\n\v\f]+\\|[ \t\r\n\v\f]+\\'\\)" "" (read-string prompt default))))
+    (and (> (length result) 0) (replace-regexp-in-string "[ \t\r\n\v\f]+" " " result))))
+
+(defun gdb--escape-argument (string)
+  "Return STRING quoted properly as an MI argument.
+The string is enclosed in double quotes.
+All embedded quotes, newlines, and backslashes are preceded with a backslash."
+  (setq string (replace-regexp-in-string "\\([\"\\]\\)" "\\\\\\&" string t))
+  (setq string (replace-regexp-in-string "\n" "\\n" string t t))
+  (concat "\"" string "\""))
+
+(defmacro gdb--measure-time (string &rest body)
+  "Measure the time it takes to evaluate BODY."
+  `(if (gdb--debug-check 'timings)
+       (progn
+         (message (concat "Starting measurement: " ,string))
+         (let ((time (current-time))
+               (result (progn ,@body)))
+           (message "GDB TIME MEASUREMENT: %s - %.06fs" ,string (float-time (time-since time)))
+           result))
+     (progn ,@body)))
+
+(defmacro gdb--current-line (&optional pos)
+  "Return current line number. When POS is provided, count lines until POS."
+  `(save-excursion ,(when pos `(goto-char ,pos))
+                   (beginning-of-line)
+                   (1+ (count-lines 1 (point)))))
+
+(defun gdb--get-line (path line &optional trim)
+  (when (and path line (> line 0))
+    (let ((buffer (gdb--find-file path)))
+      (when buffer
+        (with-current-buffer buffer
+          (save-excursion
+            (goto-char (point-min))
+            (forward-line (1- line))
+            (let ((string (thing-at-point 'line)))
+              (if trim
+                  (replace-regexp-in-string "\\(\\`[[:space:]\n]*\\|[[:space:]\n]*\\'\\)" "" string)
+                string))))))))
+
+(defsubst gdb--stn (str) (and (stringp str) (string-to-number str)))
+(defsubst gdb--nts (num) (and (numberp num) (number-to-string num)))
+(defsubst gdb--add-face (string face) (when string (propertize string 'face face)))
+
+(defmacro gdb--update-struct (type struct &rest pairs)
+  (declare (indent defun))
+  `(progn ,@(cl-loop for (key val) in pairs
+                     collect `(setf (,(intern (concat (symbol-name type) "-" (symbol-name key))) ,struct) ,val))))
+
+(defun gdb--location-string (&optional func file line from addr)
+  (when file (setq file (file-name-nondirectory file)))
+  (concat "in " (propertize (or func "??") 'face 'gdb-function-face)
+          (and addr (concat " at " (propertize addr 'face 'gdb-constant-face)))
+          (or (and file line (format " of %s:%d" file line))
+              (and from (concat " of " from)))))
+
+(defun gdb--frame-location-string (frame &optional for-threads-view)
+  (cond (frame (gdb--location-string (gdb--frame-func frame) (gdb--frame-file frame) (gdb--frame-line frame)
+                                     (gdb--frame-from frame) (and for-threads-view   (gdb--frame-addr frame))))
+        (t "No information")))
+
+(defun gdb--append-to-buffer (buffer string)
+  (when (buffer-live-p buffer)
+    (let* ((windows (get-buffer-window-list buffer nil t))
+           windows-to-move return-pos)
+      (with-current-buffer buffer
+        (dolist (window windows)
+          (when (= (window-point window) (point-max))
+            (push window windows-to-move)))
+
+        (unless (= (point) (point-max))
+          (setq return-pos (point))
+          (goto-char (point-max)))
+        (insert string)
+        (when return-pos (goto-char return-pos))
+
+        (dolist (window windows-to-move)
+          (set-window-point window (point-max)))))))
+
+(defsubst gdb--parse-address (addr-str)
+  (and addr-str (string-to-number (substring addr-str 2) 16)))
+
+
+;; ------------------------------------------------------------------------------------------
+;; Session management
+(defsubst gdb--infer-session (&optional only-from-buffer)
+  (or (and (gdb--buffer-info-p gdb--buffer-info)
+           (gdb--session-p (gdb--buffer-info-session gdb--buffer-info))
+           (gdb--buffer-info-session gdb--buffer-info))
+      (and (not only-from-buffer)
+           (gdb--session-p (frame-parameter nil 'gdb--session))
+           (frame-parameter nil 'gdb--session))))
+
+(defun gdb--valid-session (session)
+  "Returns t if SESSION is valid. Else, nil."
+  (when (gdb--session-p session)
+    (if (and (frame-live-p (gdb--session-frame session))
+             (process-live-p (gdb--session-process session)))
+        t
+      (gdb--kill-session session)
+      nil)))
+
+(defmacro gdb--with-valid-session (&rest body)
+  (declare (debug ([&optional stringp] body)))
+  (let ((message (and (stringp (car body)) (car body))))
+    (when message (setq body (cdr body)))
+    `(let ((session (gdb--infer-session)))
+       (if (gdb--valid-session session)
+           (progn ,@body)
+         ,(when message `(error "%s" ,message))))))
+
+(defun gdb--kill-session (session)
+  (when (and (gdb--session-p session) (memq session gdb--sessions))
+    (setq gdb--sessions (delq session gdb--sessions))
+    (when (= (length gdb--sessions) 0)
+      (remove-hook 'delete-frame-functions #'gdb--handle-delete-frame)
+      (remove-hook 'window-configuration-change-hook #'gdb--rename-frame)
+      (gdb-keys-mode -1))
+
+    (unless (cl-loop for frame in (frame-list)
+                     when (and (not (eq (frame-parameter frame 'gdb--session) session))
+                               (frame-visible-p frame) (not (frame-parent frame))
+                               (not (frame-parameter frame 'delete-before)))
+                     return t)
+      (save-buffers-kill-emacs)
+      (make-frame))
+
+    (cl-loop for frame in (frame-list)
+             when (and (eq (frame-parameter frame 'gdb--session) session)
+                       (not (eq frame (gdb--session-frame session))))
+             do (delete-frame frame))
+
+    (when (frame-live-p (gdb--session-frame session))
+      (set-frame-parameter (gdb--session-frame session) 'gdb--session nil)
+      (delete-frame (gdb--session-frame session)))
+
+    (set-process-sentinel (gdb--session-process session) nil)
+    (delete-process (gdb--session-process session))
+
+    (dolist (buffer (gdb--session-buffers session))
+      (when (buffer-live-p buffer)
+        (with-current-buffer buffer
+          (if gdb--buffer-info
+              (let ((type (gdb--buffer-info-type gdb--buffer-info)))
+                (when (eq type 'gdb--inferior-io)
+                  (let ((proc (get-buffer-process buffer)))
+                    (when proc
+                      (set-process-sentinel proc nil)
+                      (delete-process (get-buffer-process buffer)))))
+
+                (if (memq type gdb--keep-buffer-types)
+                    (setq gdb--buffer-info nil)
+                  (kill-buffer)))
+            (kill-buffer)))))
+
+    (gdb--remove-all-symbols session 'all)))
+
+(defun gdb--get-data (command key &rest args-to-command)
+  "Synchronously retrieve result KEY of COMMAND.
+ARGS-TO-COMMAND are passed to `gdb--command', after the context."
+  (gdb--with-valid-session
+   (setq gdb--data nil)
+   (apply 'gdb--command command (cons 'gdb--context-get-data key) args-to-command)
+   (while (not gdb--data) (accept-process-output (gdb--session-process session) 0.5))
+   (when (stringp gdb--data) gdb--data)))
+
+
+;; ------------------------------------------------------------------------------------------
 ;; Fringe symbols
 (defun gdb--place-symbol (session buffer line-or-pos data)
   "Place fringe symbol from SESSION on BUFFER.
@@ -329,81 +536,6 @@ that are not created by GDB."
 (defun gdb--breakpoint-remove-symbol (breakpoint)
   (dolist (overlay (gdb--breakpoint-overlays breakpoint)) (delete-overlay overlay))
   (setf (gdb--breakpoint-overlays breakpoint) nil))
-
-
-;; ------------------------------------------------------------------------------------------
-;; Session management
-(defsubst gdb--infer-session (&optional only-from-buffer)
-  (or (and (gdb--buffer-info-p gdb--buffer-info)
-           (gdb--session-p (gdb--buffer-info-session gdb--buffer-info))
-           (gdb--buffer-info-session gdb--buffer-info))
-      (and (not only-from-buffer)
-           (gdb--session-p (frame-parameter nil 'gdb--session))
-           (frame-parameter nil 'gdb--session))))
-
-(defun gdb--valid-session (session)
-  "Returns t if SESSION is valid. Else, nil."
-  (when (gdb--session-p session)
-    (if (and (frame-live-p (gdb--session-frame session))
-             (process-live-p (gdb--session-process session)))
-        t
-      (gdb--kill-session session)
-      nil)))
-
-(defmacro gdb--with-valid-session (&rest body)
-  (declare (debug ([&optional stringp] body)))
-  (let ((message (and (stringp (car body)) (car body))))
-    (when message (setq body (cdr body)))
-    `(let ((session (gdb--infer-session)))
-       (if (gdb--valid-session session)
-           (progn ,@body)
-         ,(when message `(error "%s" ,message))))))
-
-(defun gdb--kill-session (session)
-  (when (and (gdb--session-p session) (memq session gdb--sessions))
-    (setq gdb--sessions (delq session gdb--sessions))
-    (when (= (length gdb--sessions) 0)
-      (remove-hook 'delete-frame-functions #'gdb--handle-delete-frame)
-      (remove-hook 'window-configuration-change-hook #'gdb--rename-frame)
-      (gdb-keys-mode -1))
-
-    (unless (cl-loop for frame in (frame-list)
-                     when (and (not (eq (frame-parameter frame 'gdb--session) session))
-                               (frame-visible-p frame) (not (frame-parent frame))
-                               (not (frame-parameter frame 'delete-before)))
-                     return t)
-      (save-buffers-kill-emacs)
-      (make-frame))
-
-    (cl-loop for frame in (frame-list)
-             when (and (eq (frame-parameter frame 'gdb--session) session)
-                       (not (eq frame (gdb--session-frame session))))
-             do (delete-frame frame))
-
-    (when (frame-live-p (gdb--session-frame session))
-      (set-frame-parameter (gdb--session-frame session) 'gdb--session nil)
-      (delete-frame (gdb--session-frame session)))
-
-    (set-process-sentinel (gdb--session-process session) nil)
-    (delete-process (gdb--session-process session))
-
-    (dolist (buffer (gdb--session-buffers session))
-      (when (buffer-live-p buffer)
-        (with-current-buffer buffer
-          (if gdb--buffer-info
-              (let ((type (gdb--buffer-info-type gdb--buffer-info)))
-                (when (eq type 'gdb--inferior-io)
-                  (let ((proc (get-buffer-process buffer)))
-                    (when proc
-                      (set-process-sentinel proc nil)
-                      (delete-process (get-buffer-process buffer)))))
-
-                (if (memq type gdb--keep-buffer-types)
-                    (setq gdb--buffer-info nil)
-                  (kill-buffer)))
-            (kill-buffer)))))
-
-    (gdb--remove-all-symbols session 'all)))
 
 
 ;; ------------------------------------------------------------------------------------------
@@ -527,118 +659,6 @@ When the thread is switched, the current frame will also be changed."
        (unless default-string (setq default-string (caar collection)))
        (cdr (assoc (completing-read "Thread: " collection nil t nil nil default-string)
                    collection))))))
-
-
-;; ------------------------------------------------------------------------------------------
-;; Utilities
-(defun gdb--debug-check (arg)
-  "Check if debug ARG is enabled.
-Type may be a symbol or a list of symbols and are checked against `gdb-debug'."
-  (or (eq gdb-debug t)
-      (and (listp arg) (cl-loop for type in arg when (memq type gdb-debug) return t))
-      (and (symbolp arg) (memq arg gdb-debug))))
-
-(defmacro gdb--debug-execute-body (debug-symbol &rest body)
-  "Execute body when DEBUG-SYMBOL is in `gdb-debug'.
-DEBUG-SYMBOL may be a symbol or a list of symbols."
-  (declare (indent defun))
-  `(when (gdb--debug-check ,debug-symbol) (progn ,@body)))
-
-(defun gdb--read-line (prompt &optional default)
-  "Read a line of user input with PROMPT and DEFAULT value.
-The string is trimmed and all the spaces (including newlines) are converted into a single space."
-  (let ((result (replace-regexp-in-string
-                 "\\(\\`[ \t\r\n\v\f]+\\|[ \t\r\n\v\f]+\\'\\)" "" (read-string prompt default))))
-    (and (> (length result) 0) (replace-regexp-in-string "[ \t\r\n\v\f]+" " " result))))
-
-(defun gdb--escape-argument (string)
-  "Return STRING quoted properly as an MI argument.
-The string is enclosed in double quotes.
-All embedded quotes, newlines, and backslashes are preceded with a backslash."
-  (setq string (replace-regexp-in-string "\\([\"\\]\\)" "\\\\\\&" string t))
-  (setq string (replace-regexp-in-string "\n" "\\n" string t t))
-  (concat "\"" string "\""))
-
-(defmacro gdb--measure-time (string &rest body)
-  "Measure the time it takes to evaluate BODY."
-  `(if (gdb--debug-check 'timings)
-       (progn
-         (message (concat "Starting measurement: " ,string))
-         (let ((time (current-time))
-               (result (progn ,@body)))
-           (message "GDB TIME MEASUREMENT: %s - %.06fs" ,string (float-time (time-since time)))
-           result))
-     (progn ,@body)))
-
-(defmacro gdb--current-line (&optional pos)
-  "Return current line number. When POS is provided, count lines until POS."
-  `(save-excursion ,(when pos `(goto-char ,pos))
-                   (beginning-of-line)
-                   (1+ (count-lines 1 (point)))))
-
-(defun gdb--get-line (path line &optional trim)
-  (when (and path line (> line 0))
-    (let ((buffer (gdb--find-file path)))
-      (when buffer
-        (with-current-buffer buffer
-          (save-excursion
-            (goto-char (point-min))
-            (forward-line (1- line))
-            (let ((string (thing-at-point 'line)))
-              (if trim
-                  (replace-regexp-in-string "\\(\\`[[:space:]\n]*\\|[[:space:]\n]*\\'\\)" "" string)
-                string))))))))
-
-(defsubst gdb--stn (str) (and (stringp str) (string-to-number str)))
-(defsubst gdb--nts (num) (and (numberp num) (number-to-string num)))
-(defsubst gdb--add-face (string face) (when string (propertize string 'face face)))
-
-(defmacro gdb--update-struct (type struct &rest pairs)
-  (declare (indent defun))
-  `(progn ,@(cl-loop for (key val) in pairs
-                     collect `(setf (,(intern (concat (symbol-name type) "-" (symbol-name key))) ,struct) ,val))))
-
-(defun gdb--location-string (&optional func file line from addr)
-  (when file (setq file (file-name-nondirectory file)))
-  (concat "in " (propertize (or func "??") 'face 'gdb-function-face)
-          (and addr (concat " at " (propertize addr 'face 'gdb-constant-face)))
-          (or (and file line (format " of %s:%d" file line))
-              (and from (concat " of " from)))))
-
-(defun gdb--frame-location-string (frame &optional for-threads-view)
-  (cond (frame (gdb--location-string (gdb--frame-func frame) (gdb--frame-file frame) (gdb--frame-line frame)
-                                     (gdb--frame-from frame) (and for-threads-view   (gdb--frame-addr frame))))
-        (t "No information")))
-
-(defun gdb--append-to-buffer (buffer string)
-  (when (buffer-live-p buffer)
-    (let* ((windows (get-buffer-window-list buffer nil t))
-           windows-to-move return-pos)
-      (with-current-buffer buffer
-        (dolist (window windows)
-          (when (= (window-point window) (point-max))
-            (push window windows-to-move)))
-
-        (unless (= (point) (point-max))
-          (setq return-pos (point))
-          (goto-char (point-max)))
-        (insert string)
-        (when return-pos (goto-char return-pos))
-
-        (dolist (window windows-to-move)
-          (set-window-point window (point-max)))))))
-
-(defun gdb--get-data (command key &rest args-to-command)
-  "Synchronously retrieve result KEY of COMMAND.
-ARGS-TO-COMMAND are passed to `gdb--command', after the context."
-  (gdb--with-valid-session
-   (setq gdb--data nil)
-   (apply 'gdb--command command (cons 'gdb--context-get-data key) args-to-command)
-   (while (not gdb--data) (accept-process-output (gdb--session-process session) 0.5))
-   (when (stringp gdb--data) gdb--data)))
-
-(defsubst gdb--parse-address (addr-str)
-  (and addr-str (string-to-number (substring addr-str 2) 16)))
 
 
 ;; ------------------------------------------------------------------------------------------
@@ -2363,5 +2383,5 @@ If ARG is `dprintf' create a dprintf breakpoint instead."
              when (eq (frame-parameter frame 'gdb--session) session)
              do (gdb--rename-frame frame))))
 
-(provide 'gdb)
-;;; gdb.el ends here
+(provide 'gdb-mi)
+;;; gdb-mi.el ends here

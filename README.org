@@ -1,0 +1,23 @@
+* GDB Graphical Interface for GNU Emacs
+This package provides a *graphical interface* to the *GDB debugger*. It is intended to be *fast* and
+*intuitive*.
+
+It was made as a drop-in replacement for the builtin package [[https://www.gnu.org/software/emacs/manual/html_node/emacs/GDB-Graphical-Interface.html][gdb-mi]] (check [[#why-rewrite][this question]] for the reason
+behind rewriting the entire package from scratch).
+
+** TODO Features
+** TODO Interested? Here's the installation guide!
+#+BEGIN_SRC elisp
+(quelpa '(gdb-mi :fetcher git :url "https://github.com/weirdNox/emacs-gdb.git" :files ("*.el" "*.c" "*.h" "Makefile")))
+#+END_SRC
+
+** TODO Keybindings
+** FAQ
+*** TODO Why rewrite the already existing package that comes with Emacs? @@html:<a name="why-rewrite">@@
+:PROPERTIES:
+:CUSTOM_ID: why-rewrite
+:END:
+*** TODO Why use this interface instead of [insert Linux graphical debugger here]?
+** Other information
+- This package uses the library [[https://github.com/brasko/gdbwire][GDBWIRE]] for parsing the GDB/MI output.
+- The original Emacs GDB interface was my main inspiration, so thanks Nick Roberts!
