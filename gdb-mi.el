@@ -49,6 +49,20 @@
 (defgroup gdb nil
   "A GDB graphical interface"
   :group 'tools
+  :prefix  "gdb-"
+  :version "26.1")
+
+(defcustom gdb-enable-global-keybindings t
+  "If non-nil, enable `gdb-keys-mode' which provides global keybindings while there are open sessions."
+  :group 'gdb
+  :type 'boolean
+  :version "26.1")
+
+(defcustom gdb-window-setup-function #'gdb--setup-windows
+  "Function to setup the windows and buffers in the main frame.
+If you want to write your own, use `gdb--setup-windows' as inspiration!"
+  :group 'gdb
+  :type 'function
   :version "26.1")
 
 (defcustom gdb-watchers-hide-access-specifiers t
@@ -80,10 +94,16 @@ This can also be set to t, which means that all debug components are active."
 ;; Faces and bitmaps
 (define-fringe-bitmap 'gdb--fringe-breakpoint "\x3c\x7e\xff\xff\xff\xff\x7e\x3c")
 
+(defgroup gdb-faces nil
+  "Faces in the GDB graphical interface"
+  :group 'gdb
+  :version "26.1"
+  :prefix "gdb-")
+
 (defface gdb-breakpoint-enabled-face
   '((t :foreground "red1" :weight bold))
   "Face for enabled breakpoint icon in fringe."
-  :group 'gdb
+  :group 'gdb-faces
   :version "26.1")
 
 (defface gdb-breakpoint-disabled-face
@@ -93,17 +113,17 @@ This can also be set to t, which means that all debug components are active."
     (((type tty) (class mono)) :inverse-video t)
     (t :background "gray"))
   "Face for disabled breakpoint icon in fringe."
-  :group 'gdb
+  :group 'gdb-faces
   :version "26.1")
 
 (defface gdb-function-face '((t :inherit font-lock-function-name-face))
   "Face for highlighting function names."
-  :group 'gdb
+  :group 'gdb-faces
   :version "26.1")
 
 (defface gdb-constant-face '((t :inherit font-lock-constant-face))
   "Face for highlighting constant values."
-  :group 'gdb
+  :group 'gdb-faces
   :version "26.1")
 
 (defface gdb-variable-face '((t :inherit font-lock-variable-name-face))
@@ -114,58 +134,58 @@ This can also be set to t, which means that all debug components are active."
 
 (defface gdb-modified-face '((t :inherit error))
   "Face for highlighting modified values in watcher and register buffers."
-  :group 'gdb
+  :group 'gdb-faces
   :version "26.1")
 
 (defface gdb-disassembly-src-face '((t :inherit font-lock-string-face))
   "Face for highlighting the source code in disassembly buffers."
-  :group 'gdb
+  :group 'gdb-faces
   :version "26.1")
 
 (defface gdb-disassembly-line-indicator-face '((t :inherit font-lock-type-face))
   "Face for highlighting the source code line number in disassembly buffers."
-  :group 'gdb
+  :group 'gdb-faces
   :version "26.1")
 
 (defface gdb-opcode-face '((t :inherit font-lock-keyword-face))
   "Face for highlighting opcodes in disassembly buffers."
-  :group 'gdb
+  :group 'gdb-faces
   :version "26.1")
 
 (defface gdb-raw-opcode-face '((t :inherit font-lock-comment-face))
   "Face for highlighting raw opcodes in disassembly buffers."
-  :group 'gdb
+  :group 'gdb-faces
   :version "26.1")
 
 (eval-and-compile
   (defface gdb-running-face '((t :inherit font-lock-string-face))
     "Face for highlighting the \"running\" keyword."
-    :group 'gdb
+    :group 'gdb-faces
     :version "26.1")
 
   (defface gdb-stopped-face '((t :inherit font-lock-warning-face))
     "Face for highlighting the \"stopped\" keyword."
-    :group 'gdb
+    :group 'gdb-faces
     :version "26.1")
 
   (defface gdb-out-of-scope-face '((t :inherit font-lock-comment-face))
     "Face for highlighting \"Out of scope\" in watcher buffers."
-    :group 'gdb
+    :group 'gdb-faces
     :version "26.1")
 
   (defface gdb-watcher-hold-face '((t :inherit error))
     "Face for highlighting \"[HOLD]\" in watcher buffers."
-    :group 'gdb
+    :group 'gdb-faces
     :version "26.1")
 
   (defface gdb-y-face '((t :inherit font-lock-warning-face))
     "Face for highlighting the enabled symbol \"y\" in breakpoint buffers."
-    :group 'gdb
+    :group 'gdb-faces
     :version "26.1")
 
   (defface gdb-n-face '((t :inherit font-lock-comment-face))
     "Face for highlighting the disabled symbol \"n\" in breakpoint buffers."
-    :group 'gdb
+    :group 'gdb-faces
     :version "26.1"))
 
 
@@ -920,7 +940,8 @@ If WITH-HEADER is set, then the first row is used as header."
       (gdb--set-window-buffer middle-right (gdb--frames-get-buffer session))
       (gdb--set-window-buffer bottom-left  (gdb--watchers-get-buffer session))
       (gdb--set-window-buffer bottom-right (gdb--variables-get-buffer session))
-      (setf (gdb--session-source-window session) top-left))))
+      (setf (gdb--session-source-window session) top-left)
+      (gdb--display-source-buffer))))
 
 (defun gdb--switch-buffer (buffer-fun)
   (gdb--with-valid-session
@@ -1399,14 +1420,16 @@ stopped thread before running the command. If FORCE-STOPPED is
 
 (defun gdb--watchers-update ()
   (gdb--with-valid-session
-   (let* ((window-start (window-start (get-buffer-window nil t)))
-          (table (make-gdb--table :start-line  (gdb--current-line window-start)
+   (let* ((window (get-buffer-window nil t))
+          (window-start (and window (window-start window)))
+          (table (make-gdb--table :start-line (and window-start (gdb--current-line window-start))
                                   :target-line (gdb--current-line))))
 
      (gdb--table-add-header table '("Expr" "Type" "Value"))
 
-     (let ((watcher-at-start     (get-text-property window-start              'gdb--watcher))
-           (watcher-under-cursor (get-text-property (line-beginning-position) 'gdb--watcher))
+     (let ((watcher-at-start     (and window-start
+                                      (get-text-property window-start              'gdb--watcher)))
+           (watcher-under-cursor      (get-text-property (line-beginning-position) 'gdb--watcher))
            (tick (gdb--session-watchers-tick session)))
        (cl-loop for watcher in (gdb--session-root-watchers session)
                 do (gdb--watcher-draw table watcher tick watcher-at-start watcher-under-cursor)))
@@ -1976,6 +1999,7 @@ it from the list."
 ;; ------------------------------------------------------------------------------------------
 ;; User commands
 (defun gdb-watcher-add (&optional default watcher-to-replace hold-thread stack-depth)
+  "Start watching an expression."
   (interactive)
   (gdb--with-valid-session
    (unless (gdb--session-selected-frame session) (user-error "No frame is selected"))
@@ -1996,6 +2020,7 @@ it from the list."
                      (or hold-frame (gdb--session-selected-frame session)))))))
 
 (defun gdb-watcher-toggle ()
+  "Toggle watcher under cursor's children visibility"
   (interactive)
   (gdb--with-valid-session
    (when (gdb--is-buffer-type 'gdb--watchers)
@@ -2010,6 +2035,7 @@ it from the list."
          (gdb--update))))))
 
 (defun gdb-watcher-assign ()
+  "Assign a value to the watched expression."
   (interactive)
   (gdb--with-valid-session
    (when (gdb--is-buffer-type 'gdb--watchers)
@@ -2027,6 +2053,8 @@ it from the list."
        (gdb--command "-var-update --all-values *" (cons 'gdb--context-watcher-update t) frame)))))
 
 (defun gdb-watcher-edit-expression ()
+  "Modify the watched expression.
+If the watcher is holding to a frame, this expression will also be evaluated in that frame."
   (interactive)
   (gdb--with-valid-session
    (when (gdb--is-buffer-type 'gdb--watchers)
@@ -2039,6 +2067,9 @@ it from the list."
        (gdb-watcher-add (gdb--watcher-expr watcher) watcher hold-thread stack-depth)))))
 
 (defun gdb-watcher-duplicate ()
+  "Duplicate the watcher under cursor.
+It may be a root or child watcher. There is a prompt for the new expression.
+If the duplicated watcher is holding to a frame, this expression will also be evaluated in that frame."
   (interactive)
   (gdb--with-valid-session
    (when (gdb--is-buffer-type 'gdb--watchers)
@@ -2067,6 +2098,13 @@ it from the list."
          (gdb--watcher-change-format watcher format))))))
 
 (defun gdb-watcher-toggle-hold-frame ()
+  "This command will toggle the hold state of the watcher under cursor.
+If this is a floating watcher (not holding to any frame), this will hold the watcher to the selected frame.
+Else, this will convert the watcher to floating again.
+
+Notice that this is different from \"freezing\"! This will make the watcher become attached to
+the selected frame; nevertheless, the watcher will update if something (eg. a pointer to it) modifies
+it outside the frame it is attached to."
   (interactive)
   (gdb--with-valid-session
    (when (gdb--is-buffer-type 'gdb--watchers)
@@ -2087,6 +2125,8 @@ it from the list."
        (gdb-watcher-add (cons (gdb--watcher-expr watcher) nil) watcher hold-thread stack-depth)))))
 
 (defun gdb-watchers-toggle-access-specifiers ()
+  "This will show or hide the access specifiers in watchers.
+The default behaviour is defined by `gdb-watchers-hide-access-specifiers'."
   (interactive)
   (gdb--with-valid-session
    (setf (gdb--session-hide-access-spec session) (not (gdb--session-hide-access-spec session)))
@@ -2094,6 +2134,7 @@ it from the list."
             do (gdb-watcher-add (cons (gdb--watcher-expr watcher) nil) watcher))))
 
 (defun gdb-watcher-delete ()
+  "Delete root watcher under cursor."
   (interactive)
   (gdb--with-valid-session
    (when (gdb--is-buffer-type 'gdb--watchers)
@@ -2105,6 +2146,8 @@ it from the list."
        (gdb--update)))))
 
 (defun gdb-create-watcher-from (arg)
+  "Create watcher from automatic variables or registers.
+If ARG is non-nil, you may modify the watcher expression before creation."
   (interactive "P")
   (gdb--with-valid-session
    (let ((expression
@@ -2126,10 +2169,12 @@ it from the list."
        (gdb--scroll-buffer-to-last-line (gdb--watchers-get-buffer session))))))
 
 (defun gdb-create-watcher-from-ask ()
+  "Create watcher from automatic variables or registers, giving the possibility to change the expression."
   (interactive)
   (gdb-create-watcher-from t))
 
 (defun gdb-eval-expression ()
+  "Evaluate expression once and print result."
   (interactive)
   (gdb--with-valid-session
    (let* ((frame (or (gdb--session-selected-frame session) (user-error "No frame is selected")))
@@ -2224,18 +2269,22 @@ If ARG is non-nil, stop all threads unconditionally."
        (gdb--update)))))
 
 (defun gdb-next ()
+  "Step over."
   (interactive)
   (gdb--with-valid-session (gdb--command "-exec-next" 'gdb--context-persist-thread t)))
 
 (defun gdb-next-instruction ()
+  "Step over instruction."
   (interactive)
   (gdb--with-valid-session (gdb--command "-exec-next-instruction" 'gdb--context-persist-thread t)))
 
 (defun gdb-step ()
+  "Step into."
   (interactive)
   (gdb--with-valid-session (gdb--command "-exec-step" 'gdb--context-persist-thread t)))
 
 (defun gdb-step-instruction ()
+  "Step into instruction."
   (interactive)
   (gdb--with-valid-session (gdb--command "-exec-step-instruction" 'gdb--context-persist-thread t)))
 
@@ -2349,6 +2398,7 @@ If ARG is `dprintf' create a dprintf breakpoint instead."
   (gdb-toggle-breakpoint 'dprintf))
 
 (defun gdb-breakpoint-enable-disable ()
+  "Enable or disable inferred breakpoint."
   (interactive)
   (gdb--with-valid-session
    (let ((breakpoint (gdb--infer-breakpoint)))
@@ -2359,6 +2409,7 @@ If ARG is `dprintf' create a dprintf breakpoint instead."
                          (cons breakpoint (not (gdb--breakpoint-enabled breakpoint))))))))
 
 (defun gdb-delete-breakpoint ()
+  "Delete inferred breakpoint."
   (interactive)
   (gdb--with-valid-session
    (let ((breakpoint-on-point (gdb--infer-breakpoint)))
@@ -2367,6 +2418,7 @@ If ARG is `dprintf' create a dprintf breakpoint instead."
                      (cons 'gdb--context-breakpoint-delete breakpoint-on-point))))))
 
 (defun gdb-registers-change-format ()
+  "Change the format the registers are displayed in."
   (interactive)
   (gdb--with-valid-session
    (when (gdb--is-buffer-type 'gdb--registers)
@@ -2381,6 +2433,7 @@ If ARG is `dprintf' create a dprintf breakpoint instead."
                      (cons 'gdb--context-registers-update thread) thread)))))
 
 (defun gdb-disassembly-change-format ()
+  "Change the disassembly format."
   (interactive)
   (gdb--with-valid-session
    (when (gdb--is-buffer-type 'gdb--disassembly)
@@ -2394,6 +2447,13 @@ If ARG is `dprintf' create a dprintf breakpoint instead."
              (gdb--disassembly-data-func data) nil)
        (gdb--disassembly-fetch (gdb--session-selected-frame session))))))
 
+(defun gdb-setup-windows (&optional session)
+  "Setup windows in the main frame."
+  (interactive)
+  (setq session (or session (gdb--infer-session)))
+  (unless session (user-error "Couldn't find a GDB session"))
+  (funcall gdb-window-setup-function session))
+
 (defun gdb-kill-session ()
   "Kill current GDB session."
   (interactive)
@@ -2401,6 +2461,7 @@ If ARG is `dprintf' create a dprintf breakpoint instead."
 
 ;;;###autoload
 (defun gdb-create-session ()
+  "Create GDB session. This will not associate any target with it."
   (interactive)
   (let* ((session (make-gdb--session))
          (frame (gdb--create-frame session)))
@@ -2415,8 +2476,9 @@ If ARG is `dprintf' create a dprintf breakpoint instead."
       (gdb--command "-gdb-set mi-async on")
       (gdb--command "-gdb-set non-stop on"))
 
-    (gdb--setup-windows session)
-    (gdb-keys-mode)
+    (gdb-setup-windows session)
+    (when gdb-enable-global-keybindings
+      (gdb-keys-mode))
 
     (add-hook 'delete-frame-functions #'gdb--handle-delete-frame)
     (add-hook 'window-configuration-change-hook #'gdb--rename-frame)
@@ -2425,7 +2487,8 @@ If ARG is `dprintf' create a dprintf breakpoint instead."
 
 ;;;###autoload
 (defun gdb-executable ()
-  "Start debugging an executable with GDB in a new frame."
+  "Start debugging an executable in the current session.
+If no session is available, one is automatically created."
   (interactive)
   (let ((debuggee-path (expand-file-name (read-file-name "Select executable to debug: " nil
                                                          gdb--previous-executable t nil 'file-executable-p)))

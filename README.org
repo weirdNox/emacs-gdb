@@ -2,22 +2,139 @@
 This package provides a *graphical interface* to the *GDB debugger*. It is intended to be *fast* and
 *intuitive*.
 
+[[file:assets/screenshot.png]]
+
 It was made as a drop-in replacement for the builtin package [[https://www.gnu.org/software/emacs/manual/html_node/emacs/GDB-Graphical-Interface.html][gdb-mi]] (check [[#why-rewrite][this question]] for the reason
 behind rewriting the entire package from scratch).
 
-** TODO Features
-** TODO Interested? Here's the installation guide!
+** Features
+- Fast :: Instead of parsing the GDB/MI output in Elisp, I've created a [[https://www.gnu.org/software/emacs/manual/html_node/elisp/Dynamic-Modules.html][dynamic module]] in C, which makes
+          it run *fast like a bullet*!
+
+- Easy to use :: The keybindings, which were inspired by *Visual Studio* and *Qt Creator*, were chosen to
+                 be *easy to memorize* and to provide the best interaction possible without much putting
+                 much strain on your fingers.
+
+- Does what you meant :: Each command tries its best to infer what you meant when you run them.
+
+- Organized :: You can change which buffer is displayed in each window, and even pop buffers to their own
+               separate frames!
+
+- Simultaneous sessions :: You can debug multiple programs at the same time, with different GDB sessions;
+     each session creates its own frame.
+
+*** List of special buffers
+- Threads
+- Stack frames
+- Breakpoints
+- Automatic variables
+- Watchers
+- Registers
+- Disassembly (of the selected stack frame)
+- Inferior I/O
+- GDB command interaction buffer (please read [[#gdb-commands][this question]] before going crazy!)
+** Interested? Here's the quick-start guide!
+*** Dependencies
+- *GCC* or *Clang* to compile the dynamic module
+  - The module is /automatically/ compiled when the package is /installed/. If you delete it, it will be
+    compiled again at load time.
+
+- *GDB* (surprise, surprise) is needed to debug programs; I've only tested version 8.2, but will probably
+  work on older ones
+
+- Emacs package *Hydra* is needed for the buffer switcher
+
+*** Package installation
+The package is named ~gdb-mi~ in order to deliberately collide with the builtin GDB package. This means
+it probably won't get accepted at MELPA.
+
+The easiest way to install it is by using [[https://framagit.org/steckerhalter/quelpa][Quelpa]], which builds the packages for you from any source you
+want.
+
+In order to install, give Quelpa the following package recipe:
 #+BEGIN_SRC elisp
-(quelpa '(gdb-mi :fetcher git :url "https://github.com/weirdNox/emacs-gdb.git" :files ("*.el" "*.c" "*.h" "Makefile")))
+'(gdb-mi :fetcher git
+         :url "https://github.com/weirdNox/emacs-gdb.git"
+         :files ("*.el" "*.c" "*.h" "Makefile"))
 #+END_SRC
 
-** TODO Keybindings
+You can use it integrated with ~use-package~ or directly with the ~quelpa~ command in your init file.
+Example:
+#+BEGIN_SRC elisp
+(use-package gdb-mi :quelpa (gdb-mi :fetcher git
+                                    :url "https://github.com/weirdNox/emacs-gdb.git"
+                                    :files ("*.el" "*.c" "*.h" "Makefile")))
+#+END_SRC
+
+You may also download everything manually and load it in your init file.
+
+*** TODO Smash those bugs!
+TODO...
+** Keybindings
+The main way to interact with this package is by using the global minor mode ~gdb-keys-mode~, which
+enables the usual keybindings you expect in a debugger, inspired by Visual Studio and Qt Creator:
+
+| Keybinding                           | Description                                                       |
+|--------------------------------------+-------------------------------------------------------------------|
+| @@html:<kbd>@@    F5 @@html:</kbd>@@ | Run or continue                                                   |
+| @@html:<kbd>@@  C-F5 @@html:</kbd>@@ | (Re)Start and break at main                                       |
+| @@html:<kbd>@@  S-F5 @@html:</kbd>@@ | Kill inferior                                                     |
+| @@html:<kbd>@@    F6 @@html:</kbd>@@ | Stop                                                              |
+| @@html:<kbd>@@    F8 @@html:</kbd>@@ | Create watcher                                                    |
+| @@html:<kbd>@@  C-F8 @@html:</kbd>@@ | Evaluate expression once                                          |
+| @@html:<kbd>@@    F9 @@html:</kbd>@@ | Create or delete breakpoint                                       |
+| @@html:<kbd>@@   F10 @@html:</kbd>@@ | Step over (instruction wise with @@html:<kbd>@@M-@@html:</kbd>@@) |
+| @@html:<kbd>@@ C-F10 @@html:</kbd>@@ | Run [[https://sourceware.org/gdb/onlinedocs/gdb/Continuing-and-Stepping.html#index-until][until]] cursor                                                  |
+| @@html:<kbd>@@   F11 @@html:</kbd>@@ | Step into (instruction wise with @@html:<kbd>@@M-@@html:</kbd>@@) |
+| @@html:<kbd>@@ C-F11 @@html:</kbd>@@ | [[https://sourceware.org/gdb/onlinedocs/gdb/Continuing-and-Stepping.html#index-advance-location][Advance]] to cursor                                                 |
+| @@html:<kbd>@@ S-F11 @@html:</kbd>@@ | Step out                                                          |
+| @@html:<kbd>@@   F12 @@html:</kbd>@@ | Switch buffer or pop to frame                                     |
+
+*** TODO Finish this...
+
 ** FAQ
-*** TODO Why rewrite the already existing package that comes with Emacs? @@html:<a name="why-rewrite">@@
+*** Why rewrite the already existing package that comes with Emacs? @@html:<a name="why-rewrite">@@
 :PROPERTIES:
 :CUSTOM_ID: why-rewrite
 :END:
-*** TODO Why use this interface instead of [insert Linux graphical debugger here]?
+There are many things that led to my decision of rewriting ~gdb-mi~:
+- When I wanted to use it, I ended up having to modify and rewrite many functions in order to have
+  predictable functionality
+
+- In some cases, the parsing would be so slow that I could not use it at all (when disassembling a big
+  function and then stepping, for example)
+
+- It felt weird that it changed all my windows instead of opening in a new frame
+
+- Other reasons I've forgotten
+
+- I like C, Elisp, and a good challenge: I couldn't find a package that used dynamic modules and it
+  seemed like the perfect chance to do something I would use, as I couldn't find a debugger for Linux
+  that I could say I liked.
+
+*** Why use this interface instead of [insert Linux graphical debugger here]?
+Well, if you use Emacs, both this and the builtin package are great because you never need to leave the
+environment you use the rest of the day.
+
+If you don't use Emacs (but are willing to try it) and you can't find a good graphical debugger for
+Linux, this could be it!
+
+If you are already happy with what you have, then there isn't much to see here. :)
+
+*** May I send custom GDB commands?@@html:<a name="gdb-commands">@@
+:PROPERTIES:
+:CUSTOM_ID: gdb-commands
+:END:
+You may send any GDB command you want.
+
+/However/, keep in mind that if:
+- the command does not use the background form (eg. ~continue&~), it *will block GDB* until it finishes
+  what it is doing, so you won't be able to interact with it! If you want to interrupt it, run
+  ~comint-interrupt-subjob~ in the interaction buffer (bound to @@html:<kbd>@@ C-c C-c @@html:</kbd>@@)
+
+- the command does not cause GDB to notify the interface of the changes it made, the interface may become
+  out of sync and start giving errors
+
 ** Other information
 - This package uses the library [[https://github.com/brasko/gdbwire][GDBWIRE]] for parsing the GDB/MI output.
 - The original Emacs GDB interface was my main inspiration, so thanks Nick Roberts!
