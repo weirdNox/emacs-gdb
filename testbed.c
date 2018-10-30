@@ -12,10 +12,11 @@ typedef struct test {
 } test;
 
 void *threadFunction(void *Vargp) {
-    printf("Thread\n");
+    int Id = *(int*)Vargp;
+    printf("Thread %d\n", Id);
     test TestVariable = {2, 3};
     TestVariable.Number = 10;
-    sleep(3);
+    sleep(2);
     return 0;
 }
 
@@ -42,12 +43,14 @@ int main(int ArgCount, char *ArgVal[]) {
         }
     }
 
-    // NOTE(nox): Thread test
+    // NOTE(nox): Threads test
     pthread_t ThreadId;
-    printf("Before Thread\n");
-    pthread_create(&ThreadId, 0, threadFunction, 0);
+
+    pthread_create(&ThreadId, 0, threadFunction, &(int){0});
     pthread_join(ThreadId, 0);
-    printf("After Thread\n");
+
+    pthread_create(&ThreadId, 0, threadFunction, &(int){1});
+    pthread_join(ThreadId, 0);
 
     // NOTE(nox): Variable tests
     char SingleLetter = 'a';
@@ -68,8 +71,9 @@ int main(int ArgCount, char *ArgVal[]) {
     // NOTE(nox): Function call test
     functionToCall("Hello world", 4);
 
-    // NOTE(nox): Recursive function teste
+    // NOTE(nox): Recursive function tests
     printf("4! = %d\n", factorial(4));
+    printf("5! = %d\n", factorial(5));
 
     return 0;
 }

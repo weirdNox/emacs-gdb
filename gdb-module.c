@@ -358,8 +358,7 @@ static void watcherCreate(emacs_env *Env, mi_result *Tuple, emacs_value Data) {
 #define resultKeys(W) W(Name, name),            \
         W(NumChild, numchild),                  \
         W(Value, value),                        \
-        W(Type, type),                          \
-        W(ThreadId, thread-id)
+        W(Type, type)
 
     gdbNamesWriter(GdbKeys, resultKeys);
     enumWriter(resultKeys);
