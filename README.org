@@ -45,9 +45,6 @@ behind rewriting the entire package from scratch).
 - Emacs package *Hydra* is needed for the buffer switcher
 
 *** Package installation
-The package is named ~gdb-mi~ in order to deliberately collide with the builtin GDB package. This means
-it probably won't get accepted at MELPA.
-
 The easiest way to install it is by using [[https://framagit.org/steckerhalter/quelpa][Quelpa]], which builds the packages for you from any source you
 want.
 
@@ -58,15 +55,26 @@ In order to install, give Quelpa the following package recipe:
          :files ("*.el" "*.c" "*.h" "Makefile"))
 #+END_SRC
 
-You can use it integrated with ~use-package~ or directly with the ~quelpa~ command in your init file.
-Example:
-#+BEGIN_SRC elisp
-(use-package gdb-mi :quelpa (gdb-mi :fetcher git
-                                    :url "https://github.com/weirdNox/emacs-gdb.git"
-                                    :files ("*.el" "*.c" "*.h" "Makefile")))
+Also, as this is intended as a replacement for the builtin GDB interface, it is *highly recommended* that
+you delete the autoload definitions in order to prevent confusion by loading the old package:
+#+BEGIN_SRC emacs-lisp
+(fmakunbound 'gdb)
+(fmakunbound 'gdb-enable-debug)
+(setplist 'gdb-non-stop nil)
+(setplist 'gdb-buffers nil)
 #+END_SRC
 
-You may also download everything manually and load it in your init file.
+Here is an example configuration using ~use-package~:
+#+BEGIN_SRC elisp
+(use-package gdb :quelpa (gdb :fetcher git
+                              :url "https://github.com/weirdNox/emacs-gdb.git"
+                              :files ("*.el" "*.c" "*.h" "Makefile"))
+  :init
+  (fmakunbound 'gdb)
+  (fmakunbound 'gdb-enable-debug)
+  (setplist 'gdb-non-stop nil)
+  (setplist 'gdb-buffers nil))
+#+END_SRC
 
 *** TODO Smash those bugs!
 TODO...

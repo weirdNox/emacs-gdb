@@ -1,10 +1,10 @@
-;;; gdb-mi.el --- GDB Graphical Interface -*- lexical-binding: t; -*-
+;;; gdb.el --- GDB Graphical Interface -*- lexical-binding: t; -*-
 
 ;; Copyright (C) 2017-2018  Gonçalo Santos
 
 ;; Author: Gonçalo Santos (aka. weirdNox)
 ;; Homepage: https://github.com/weirdNox/emacs-gdb
-;; Keywords: lisp gdb gdb-mi debugger graphical interface
+;; Keywords: lisp gdb mi debugger graphical interface
 ;; Package-Requires: ((emacs "26.1") (cl-lib "1.0") (hydra "0.14.0"))
 ;; Version: 0.1
 
@@ -2505,5 +2505,5 @@ If no session is available, one is automatically created."
              when (eq (frame-parameter frame 'gdb--session) session)
              do (gdb--rename-frame frame))))
 
-(provide 'gdb-mi)
-;;; gdb-mi.el ends here
+(provide 'gdb)
+;;; gdb.el ends here
