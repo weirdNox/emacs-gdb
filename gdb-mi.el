@@ -1,11 +1,11 @@
-;;; gdb.el --- GDB Graphical Interface -*- lexical-binding: t; -*-
+;;; gdb-mi.el --- GDB Graphical Interface -*- lexical-binding: t; -*-
 
 ;; Copyright (C) 2017-2018  Gonçalo Santos
 
-;; Author: Gonçalo Santos (aka. weirdNox)
+;; Author: Gonçalo Santos (weirdNox @ GitHub)
 ;; Homepage: https://github.com/weirdNox/emacs-gdb
 ;; Keywords: lisp gdb mi debugger graphical interface
-;; Package-Requires: ((emacs "26.1") (cl-lib "1.0") (hydra "0.14.0"))
+;; Package-Requires: ((emacs "26.1") (hydra "0.14.0"))
 ;; Version: 0.1
 
 ;; This program is free software; you can redistribute it and/or modify
@@ -27,7 +27,7 @@
 
 ;;; Code:
 ;; ------------------------------------------------------------------------------------------
-;; Load packages
+;; Package and related things
 (require 'cl-lib)
 (require 'comint)
 (require 'hydra)
@@ -43,6 +43,10 @@
 
 (declare-function gdb--handle-mi-output "ext:gdb-module")
 
+(defun gdb--clear-old-customization-vars ()
+  (setplist 'gdb-buffers  nil)
+  (setplist 'gdb-non-stop nil))
+(eval-after-load 'cus-load #'gdb--clear-old-customization-vars)
 
 ;; ------------------------------------------------------------------------------------------
 ;; User configurable variables
@@ -174,7 +178,7 @@ This can also be set to t, which means that all debug components are active."
     :version "26.1")
 
   (defface gdb-watcher-hold-face '((t :inherit error))
-    "Face for highlighting \"[HOLD]\" in watcher buffers."
+    "Face for highlighting \"HOLD\" in watcher buffers."
     :group 'gdb-faces
     :version "26.1")
 
@@ -1993,7 +1997,8 @@ it from the list."
             (define-key map (kbd "<C-f11>") #'gdb-advance)
             (define-key map (kbd "<S-f11>") #'gdb-finish)
             (define-key map (kbd   "<f12>") #'gdb-switch-buffer/body)
-            map))
+            map)
+  :group 'gdb)
 
 
 ;; ------------------------------------------------------------------------------------------
@@ -2505,5 +2510,5 @@ If no session is available, one is automatically created."
              when (eq (frame-parameter frame 'gdb--session) session)
              do (gdb--rename-frame frame))))
 
-(provide 'gdb)
-;;; gdb.el ends here
+(provide 'gdb-mi)
+;;; gdb-mi.el ends here
