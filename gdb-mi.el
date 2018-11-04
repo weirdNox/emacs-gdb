@@ -37,6 +37,7 @@
          (required-module (concat "gdb-module" module-file-suffix)))
     (if (file-exists-p required-module)
         (require 'gdb-module required-module)
+      (message "Compiling GDB dynamic module...")
       (with-current-buffer (compile (concat "make -k " required-module))
         (add-hook 'compilation-finish-functions
                   (lambda (_buffer _status) (require 'gdb-module required-module)) nil t)))))
@@ -343,19 +344,6 @@ All embedded quotes, newlines, and backslashes are preceded with a backslash."
                    (beginning-of-line)
                    (1+ (count-lines 1 (point)))))
 
-(defun gdb--get-line (path line &optional trim)
-  (when (and path line (> line 0))
-    (let ((buffer (gdb--find-file path)))
-      (when buffer
-        (with-current-buffer buffer
-          (save-excursion
-            (goto-char (point-min))
-            (forward-line (1- line))
-            (let ((string (thing-at-point 'line)))
-              (if trim
-                  (replace-regexp-in-string "\\(\\`[[:space:]\n]*\\|[[:space:]\n]*\\'\\)" "" string)
-                string))))))))
-
 (defsubst gdb--stn (str) (and (stringp str) (string-to-number str)))
 (defsubst gdb--nts (num) (and (numberp num) (number-to-string num)))
 (defsubst gdb--add-face (string face) (when string (propertize string 'face face)))
@@ -481,6 +469,38 @@ ARGS-TO-COMMAND are passed to `gdb--command', after the context."
    (apply 'gdb--command command (cons 'gdb--context-get-data key) args-to-command)
    (while (not gdb--data) (accept-process-output (gdb--session-process session) 0.5))
    (when (stringp gdb--data) gdb--data)))
+
+
+;; ------------------------------------------------------------------------------------------
+;; Files
+(defun gdb--find-file (path)
+  "Return the buffer of the file specified by PATH.
+Create the buffer, if it wasn't already open."
+  (when (and path (not (file-directory-p path)) (file-readable-p path))
+    (find-file-noselect path t)))
+
+(defun gdb--get-line (path line &optional trim)
+  (when (and path line (> line 0))
+    (let ((buffer (gdb--find-file path)))
+      (when buffer
+        (with-current-buffer buffer
+          (save-excursion
+            (goto-char (point-min))
+            (forward-line (1- line))
+            (let ((string (thing-at-point 'line)))
+              (if trim
+                  (replace-regexp-in-string "\\(\\`[[:space:]\n]*\\|[[:space:]\n]*\\'\\)" "" string)
+                string))))))))
+
+(defun gdb--complete-path (path)
+  "Add TRAMP prefix to PATH returned from GDB output, if needed."
+  (gdb--with-valid-session
+   (when path (concat (file-remote-p (buffer-local-value 'default-directory (gdb--comint-get-buffer session)))
+                      path))))
+
+(defsubst gdb--local-path (complete-path)
+  "Returns path local to the machine it is in (without TRAMP prefix)."
+  (or (file-remote-p complete-path 'localname) complete-path))
 
 
 ;; ------------------------------------------------------------------------------------------
@@ -1152,19 +1172,49 @@ stopped thread before running the command. If FORCE-STOPPED is
   (gdb-inferior-io-mode)
   (gdb--inferior-io-initialization))
 
+(defconst gdb--tramp-retry-file "/tmp/gdb-tramp-retry")
+
+(defun gdb--inferior-tramp-sender (process string)
+  (let* ((initial-dir (buffer-local-value 'default-directory (process-buffer process)))
+         (temp-file (concat (file-remote-p initial-dir) gdb--tramp-retry-file)))
+    (process-send-string process (concat string "\n"))
+    (cl-letf (((symbol-function 'message) (lambda (&rest _))))
+      (cl-loop for try from 1 to 3
+               for contents = (with-temp-buffer (insert-file-contents temp-file) (buffer-string))
+               if   (string= contents "") return nil
+               else do (progn (write-region "" nil temp-file)
+                              (process-send-string process contents))
+               finally do (write-region "" nil temp-file)))))
+
+(defun gdb--inferior-tramp-output-filter (string)
+  (if (string= string "&\"warning: GDB: Failed to set controlling terminal: Operation not permitted\\n\"\n")
+      ""
+    string))
+
 (defun gdb--inferior-io-initialization (&optional old-proc)
   (gdb--with-valid-session
-   (let ((buffer (current-buffer))
-         inferior-process tty)
+   (let* ((default-directory (buffer-local-value 'default-directory
+                                                 (gdb--get-buffer-with-type session 'gdb--comint)))
+          (remote (file-remote-p default-directory))
+          (buffer (current-buffer))
+          inferior-process tty)
      (when old-proc (set-process-buffer old-proc nil))
 
      (save-excursion
-       (setq inferior-process (get-buffer-process (make-comint-in-buffer "GDB inferior" buffer nil))
+       (setq inferior-process (get-buffer-process
+                               (apply #'make-comint-in-buffer
+                                      "GDB inferior" buffer (and remote "/bin/sh") nil
+                                      (and remote (list "-c" (concat "cat >> " gdb--tramp-retry-file)))))
              tty (or (process-get inferior-process 'remote-tty) (process-tty-name inferior-process))))
 
      (gdb--command (concat "-inferior-tty-set " tty) (cons 'gdb--context-tty-set old-proc))
 
-     (set-process-sentinel inferior-process #'gdb--inferior-io-sentinel))))
+     (set-process-sentinel inferior-process #'gdb--inferior-io-sentinel)
+
+     (when remote
+       (write-region "" nil (concat remote gdb--tramp-retry-file))
+       (setq-local comint-input-sender #'gdb--inferior-tramp-sender)
+       (setq-local comint-preoutput-filter-functions '(gdb--inferior-tramp-output-filter))))))
 
 (defun gdb--inferior-io-sentinel (proc str)
   (let ((proc-status (process-status proc))
@@ -1557,7 +1607,8 @@ stopped thread before running the command. If FORCE-STOPPED is
             ((and func file line)
              (if (string= (gdb--disassembly-data-func data) func)
                  (cl-pushnew 'gdb--disassembly (gdb--session-buffer-types-to-update session))
-               (gdb--command (format "-data-disassemble -f %s -l %d -- %d" (gdb--escape-argument file) line
+               (gdb--command (format "-data-disassemble -f %s -l %d -- %d"
+                                     (gdb--escape-argument (gdb--local-path file)) line
                                      (gdb--disassembly-data-mode data))
                              (cons 'gdb--context-disassemble data))))
             (t
@@ -1651,18 +1702,6 @@ stopped thread before running the command. If FORCE-STOPPED is
 
 ;; ------------------------------------------------------------------------------------------
 ;; Source buffers
-(defun gdb--find-file (path)
-  "Return the buffer of the file specified by PATH.
-Create the buffer, if it wasn't already open."
-  (when (and path (not (file-directory-p path)) (file-readable-p path))
-    (find-file-noselect path t)))
-
-(defun gdb--complete-path (path)
-  "Add TRAMP prefix to PATH returned from GDB output, if needed."
-  (gdb--with-valid-session
-   (when path (concat (file-remote-p (buffer-local-value 'default-directory (gdb--comint-get-buffer session)))
-                      path))))
-
 (defun gdb--display-source-buffer (&optional override-file override-line force)
   "Display buffer of the selected source, and mark the current line.
 The source file and line are fetched from the selected frame, unless OVERRIDE-FILE and OVERRIDE-LINE are set,
@@ -1755,10 +1794,8 @@ it from the list."
    (let ((thread (gdb--get-thread-by-id (string-to-number thread-id-str))))
      (setf (gdb--session-threads session) (cl-delete thread (gdb--session-threads session) :test 'eq))
 
-     (if (eq (gdb--session-selected-thread session) thread)
-         (gdb--switch-to-thread (car (gdb--session-threads session)))
-       (gdb--command "-var-update --all-values *" (cons 'gdb--context-watcher-update t)
-                     (gdb--session-selected-thread session)))
+     (when (eq (gdb--session-selected-thread session) thread)
+       (gdb--switch-to-thread (car (gdb--session-threads session))))
 
      (cl-pushnew 'gdb--threads (gdb--session-buffer-types-to-update session)))))
 
@@ -2502,7 +2539,7 @@ If no session is available, one is automatically created."
     (setf (gdb--session-debuggee-path session) debuggee-path)
 
     (with-selected-frame (gdb--session-frame session)
-      (gdb--command (concat "-file-exec-and-symbols " debuggee-path))
+      (gdb--command (concat "-file-exec-and-symbols " (gdb--escape-argument (gdb--local-path debuggee-path))))
       (gdb--command "-file-list-exec-source-file" 'gdb--context-initial-file)
       (gdb--rename-buffers-with-debuggee debuggee-path))
 

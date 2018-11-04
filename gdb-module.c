@@ -358,7 +358,8 @@ static void watcherCreate(emacs_env *Env, mi_result *Tuple, emacs_value Data) {
 #define resultKeys(W) W(Name, name),            \
         W(NumChild, numchild),                  \
         W(Value, value),                        \
-        W(Type, type)
+        W(Type, type),                          \
+        W(ThreadId, thread-id)
 
     gdbNamesWriter(GdbKeys, resultKeys);
     enumWriter(resultKeys);
@@ -541,7 +542,13 @@ static instrs_info instructionsInfo(emacs_env *Env, mi_result *InstrsList) {
         getBatchResultString(InstrTuple, InstrKeys, InstrValues, InstrKey_Count);
 
         if(InstrValues[Result_Instr]) {
-            int Width = strlen(InstrValues[Result_Instr]);
+            int Width = 0;
+            for(char *Iter = InstrValues[Result_Instr]; *Iter; ++Iter) {
+                if(*Iter == '\t') {
+                    *Iter = ' ';
+                }
+                ++Width;
+            }
             Result.InstrWidth = max(Result.InstrWidth, Width);
         }
 

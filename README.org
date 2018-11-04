@@ -32,7 +32,7 @@ behind rewriting the entire package from scratch).
 - Registers
 - Disassembly (of the selected stack frame)
 - Inferior I/O
-- GDB command interaction buffer (please read [[#gdb-commands][this question]] before going crazy!)
+- GDB command shell (please read [[#gdb-commands][this question]] before going crazy!)
 ** Interested? Here's the quick-start guide!
 *** Dependencies
 - *GCC* or *Clang* to compile the dynamic module
@@ -74,8 +74,15 @@ Here is an example configuration using ~use-package~:
   (fmakunbound 'gdb-enable-debug))
 #+END_SRC
 
-*** TODO Smash those bugs!
-TODO...
+*** Smash those bugs!
+After the installation is complete, you may start a debugging session.
+
+If you want to debug an executable, run ~gdb-executable~. You may also use this command to change the
+executable being debugged.
+
+If you want another type of target, you may try running ~gdb-create-session~ and then inserting the
+commands manually in the shell buffer. I've not tested this, so I don't know how well it works.
+
 ** Keybindings
 The main way to interact with this package is by using the global minor mode ~gdb-keys-mode~, which
 enables the usual keybindings you expect in a debugger, inspired by Visual Studio and Qt Creator:

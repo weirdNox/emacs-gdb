@@ -2890,7 +2890,7 @@ break_info(
     enum gdbwire_result result = GDBWIRE_OK;
     struct gdbwire_mi_result *mi_result;
     struct gdbwire_mi_command *mi_command = 0;
-    struct gdbwire_mi_breakpoint *breakpoints = 0, *cur_bkpt;
+    struct gdbwire_mi_breakpoint *breakpoints = 0, *cur_bkpt = 0;
     int found_body = 0;
 
     GDBWIRE_ASSERT(result_record);
