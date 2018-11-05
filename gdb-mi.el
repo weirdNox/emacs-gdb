@@ -1383,13 +1383,13 @@ stopped thread before running the command. If FORCE-STOPPED is
     (define-key map (kbd          "p") #'previous-line)
     (define-key map (kbd          "n") #'next-line)
     (define-key map (kbd        "SPC") #'gdb-create-watcher-from)
-    (define-key map (kbd        "RET") #'gdb-create-watcher-from)
     (define-key map (kbd    "<space>") #'gdb-create-watcher-from)
-    (define-key map (kbd   "<return>") #'gdb-create-watcher-from)
     (define-key map (kbd      "S-SPC") #'gdb-create-watcher-from-ask)
-    (define-key map (kbd      "S-RET") #'gdb-create-watcher-from-ask)
     (define-key map (kbd  "<S-space>") #'gdb-create-watcher-from-ask)
-    (define-key map (kbd "<S-return>") #'gdb-create-watcher-from-ask)
+    (define-key map (kbd        "RET") #'gdb-create-watcher-from-switch)
+    (define-key map (kbd   "<return>") #'gdb-create-watcher-from-switch)
+    (define-key map (kbd      "S-RET") #'gdb-create-watcher-from-switch-ask)
+    (define-key map (kbd "<S-return>") #'gdb-create-watcher-from-switch-ask)
     map))
 
 (define-derived-mode gdb-variables-mode nil "GDB Variables"
@@ -1522,13 +1522,13 @@ stopped thread before running the command. If FORCE-STOPPED is
     (define-key map (kbd          "n") #'next-line)
     (define-key map (kbd          "f") #'gdb-registers-change-format)
     (define-key map (kbd        "SPC") #'gdb-create-watcher-from)
-    (define-key map (kbd        "RET") #'gdb-create-watcher-from)
     (define-key map (kbd    "<space>") #'gdb-create-watcher-from)
-    (define-key map (kbd   "<return>") #'gdb-create-watcher-from)
     (define-key map (kbd      "S-SPC") #'gdb-create-watcher-from-ask)
-    (define-key map (kbd      "S-RET") #'gdb-create-watcher-from-ask)
     (define-key map (kbd  "<S-space>") #'gdb-create-watcher-from-ask)
-    (define-key map (kbd "<S-return>") #'gdb-create-watcher-from-ask)
+    (define-key map (kbd        "RET") #'gdb-create-watcher-from-switch)
+    (define-key map (kbd   "<return>") #'gdb-create-watcher-from-switch)
+    (define-key map (kbd      "S-RET") #'gdb-create-watcher-from-switch-ask)
+    (define-key map (kbd "<S-return>") #'gdb-create-watcher-from-switch-ask)
     map))
 
 (define-derived-mode gdb-registers-mode nil "GDB Registers"
@@ -1702,6 +1702,15 @@ stopped thread before running the command. If FORCE-STOPPED is
 
 ;; ------------------------------------------------------------------------------------------
 ;; Source buffers
+(defun gdb--create-frame-for-buffer (session buffer)
+  "Create a new frame with BUFFER. Return the frame's window."
+  (let* ((new-frame (make-frame `((gdb--session . ,session))))
+         (window (frame-first-window new-frame)))
+    (x-focus-frame new-frame)
+    (setf (gdb--session-source-window session) window)
+    (set-window-buffer window buffer)
+    window))
+
 (defun gdb--display-source-buffer (&optional override-file override-line force)
   "Display buffer of the selected source, and mark the current line.
 The source file and line are fetched from the selected frame, unless OVERRIDE-FILE and OVERRIDE-LINE are set,
@@ -1720,10 +1729,7 @@ When FORCE is non-nil, it will display it, even if the window does not exist and
           (window (gdb--session-source-window session)))
 
      (unless (or (window-live-p window) (and (not force) (gdb--disassembly-is-visible)))
-       (let ((new-frame (make-frame `((gdb--session . ,session)))))
-         (x-focus-frame new-frame)
-         (setq window (setf (gdb--session-source-window session) (frame-first-window new-frame)))
-         (set-window-buffer window (gdb--comint-get-buffer session))))
+       (setq window (gdb--create-frame-for-buffer session (gdb--comint-get-buffer session))))
 
      (when (and (not gdb--inhibit-display-source) (window-live-p window) buffer)
        (set-window-dedicated-p window nil)
@@ -2214,6 +2220,20 @@ If ARG is non-nil, you may modify the watcher expression before creation."
   "Create watcher from automatic variables or registers, giving the possibility to change the expression."
   (interactive)
   (gdb-create-watcher-from t))
+
+(defun gdb-create-watcher-from-switch (&optional arg)
+  "Create watcher from automatic variables or registers, and switch to the watchers window."
+  (interactive "P")
+  (gdb--with-valid-session
+   (gdb-create-watcher-from arg)
+   (let* ((buffer (gdb--watchers-get-buffer session))
+          (window (or (get-buffer-window buffer) (gdb--create-frame-for-buffer session buffer))))
+     (select-window window))))
+
+(defun gdb-create-watcher-from-switch-ask ()
+  "Create watcher from automatic variables or registers, ask for the expression and switch to the window."
+  (interactive)
+  (gdb-create-watcher-from-switch t))
 
 (defun gdb-eval-expression ()
   "Evaluate expression once and print result."
