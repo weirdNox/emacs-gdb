@@ -937,6 +937,14 @@ If WITH-HEADER is set, then the first row is used as header."
     (gdb--rename-frame frame)
     frame))
 
+(defun gdb--create-frame-for-buffer (session buffer)
+  "Create a new frame with BUFFER. Return the frame's window."
+  (let* ((new-frame (make-frame `((gdb--session . ,session))))
+         (window (frame-first-window new-frame)))
+    (select-frame-set-input-focus new-frame)
+    (set-window-buffer window buffer)
+    window))
+
 (defun gdb--handle-delete-frame (frame)
   (let ((session (frame-parameter frame 'gdb--session)))
     (when (and (gdb--session-p session)
@@ -973,7 +981,7 @@ If WITH-HEADER is set, then the first row is used as header."
          (window (selected-window)))
      (if gdb--open-buffer-new-frame
          (let ((frame (make-frame `((gdb--session . ,session)))))
-           (x-focus-frame frame)
+           (select-frame-set-input-focus frame)
            (setq window (frame-first-window frame)))
 
        (when (eq window (gdb--session-source-window session))
@@ -1693,15 +1701,6 @@ stopped thread before running the command. If FORCE-STOPPED is
 
 ;; ------------------------------------------------------------------------------------------
 ;; Source buffers
-(defun gdb--create-frame-for-buffer (session buffer)
-  "Create a new frame with BUFFER. Return the frame's window."
-  (let* ((new-frame (make-frame `((gdb--session . ,session))))
-         (window (frame-first-window new-frame)))
-    (x-focus-frame new-frame)
-    (setf (gdb--session-source-window session) window)
-    (set-window-buffer window buffer)
-    window))
-
 (defun gdb--display-source-buffer (&optional override-file override-line force)
   "Display buffer of the selected source, and mark the current line.
 The source file and line are fetched from the selected frame, unless OVERRIDE-FILE and OVERRIDE-LINE are set,
@@ -1720,7 +1719,8 @@ When FORCE is non-nil, it will display it, even if the window does not exist and
           (window (gdb--session-source-window session)))
 
      (unless (or (window-live-p window) (and (not force) (gdb--disassembly-is-visible)))
-       (setq window (gdb--create-frame-for-buffer session (gdb--comint-get-buffer session))))
+       (setq window (gdb--create-frame-for-buffer session (gdb--comint-get-buffer session)))
+       (setf (gdb--session-source-window session) window))
 
      (when (and (not gdb--inhibit-display-source) (window-live-p window) buffer)
        (set-window-dedicated-p window nil)
@@ -2218,8 +2218,12 @@ If ARG is non-nil, you may modify the watcher expression before creation."
   (gdb--with-valid-session
    (gdb-create-watcher-from arg)
    (let* ((buffer (gdb--watchers-get-buffer session))
-          (window (or (get-buffer-window buffer) (gdb--create-frame-for-buffer session buffer))))
-     (select-window window))))
+          (window (get-buffer-window buffer t)))
+     (if window
+         (progn
+           (select-frame-set-input-focus (window-frame window))
+           (select-window window))
+       (gdb--create-frame-for-buffer session buffer)))))
 
 (defun gdb-create-watcher-from-switch-ask ()
   "Create watcher from automatic variables or registers, ask for the expression and switch to the window."
