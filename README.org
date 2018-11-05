@@ -23,6 +23,8 @@ behind rewriting the entire package from scratch).
 - Simultaneous sessions :: You can debug multiple programs at the same time, with different GDB sessions;
      each session creates its own frame.
 
+- Debug remotely :: You may debug programs remotely over TRAMP!
+
 *** List of special buffers
 - Threads
 - Stack frames
@@ -36,8 +38,7 @@ behind rewriting the entire package from scratch).
 ** Interested? Here's the quick-start guide!
 *** Dependencies
 - *GCC* or *Clang* to compile the dynamic module
-  - The module is /automatically/ compiled when the package is /installed/. If you delete it, it will be
-    compiled again at load time.
+  - The module is /automatically/ compiled as soon as possible
 
 - *GDB* (surprise, surprise) is needed to debug programs; I've only tested version 8.2, but will probably
   work on older ones
@@ -83,7 +84,7 @@ executable being debugged.
 If you want another type of target, you may try running ~gdb-create-session~ and then inserting the
 commands manually in the shell buffer. I've not tested this, so I don't know how well it works.
 
-** Keybindings
+** Default keybindings
 The main way to interact with this package is by using the global minor mode ~gdb-keys-mode~, which
 enables the usual keybindings you expect in a debugger, inspired by Visual Studio and Qt Creator:
 
@@ -103,7 +104,58 @@ enables the usual keybindings you expect in a debugger, inspired by Visual Studi
 | @@html:<kbd>@@ S-F11 @@html:</kbd>@@ | Step out                                                          |
 | @@html:<kbd>@@   F12 @@html:</kbd>@@ | Switch buffer or pop to frame                                     |
 
-*** TODO Finish this...
+Nevertheless, even without the global minor mode, every buffer has some keybindings associated with it:
+
+*** Threads buffer
+| Keybinding                         | Description     |
+|------------------------------------+-----------------|
+| @@html:<kbd>@@ SPC @@html:</kbd>@@ | Select thread   |
+| @@html:<kbd>@@   c @@html:</kbd>@@ | Continue thread |
+| @@html:<kbd>@@   s @@html:</kbd>@@ | Stop thread     |
+
+
+*** Stack frames buffer
+| Keybinding                         | Description     |
+|------------------------------------+-----------------|
+| @@html:<kbd>@@ SPC @@html:</kbd>@@ | Select frame    |
+| @@html:<kbd>@@   c @@html:</kbd>@@ | Continue thread |
+
+*** Breakpoints buffer
+| Keybinding                                                                                                 | Description               |
+|------------------------------------------------------------------------------------------------------------+---------------------------|
+| @@html:<kbd>@@ d @@html:</kbd>@@ or @@html:<kbd>@@ ⌫ @@html:</kbd>@@ or @@html:<kbd>@@ DEL @@html:</kbd>@@ | Delete breakpoint         |
+| @@html:<kbd>@@ SPC @@html:</kbd>@@                                                                         | Enable/disable breakpoint |
+
+*** Automatic variables buffer
+| Keybinding                         | Description                                                                         |
+|------------------------------------+-------------------------------------------------------------------------------------|
+| @@html:<kbd>@@ SPC @@html:</kbd>@@ | Create watcher (prompt with @@html:<kbd>@@ Shift @@html:</kbd>@@)                   |
+| @@html:<kbd>@@ RET @@html:</kbd>@@ | Create watcher and select window (prompt with @@html:<kbd>@@ Shift @@html:</kbd>@@) |
+
+*** Watchers buffer
+| Keybinding                                                               | Description                  |
+|--------------------------------------------------------------------------+------------------------------|
+| @@html:<kbd>@@   a @@html:</kbd>@@                                       | Add new expression           |
+| @@html:<kbd>@@ RET @@html:</kbd>@@                                       | Assign to expression         |
+| @@html:<kbd>@@   e @@html:</kbd>@@                                       | Edit expression under cursor |
+| @@html:<kbd>@@   f @@html:</kbd>@@                                       | Change format                |
+| @@html:<kbd>@@   d @@html:</kbd>@@                                       | Duplicate                    |
+| @@html:<kbd>@@   h @@html:</kbd>@@                                       | Toggle frame holding         |
+| @@html:<kbd>@@   t @@html:</kbd>@@                                       | Toggle access specifiers     |
+| @@html:<kbd>@@ SPC @@html:</kbd>@@ or @@html:<kbd>@@ TAB @@html:</kbd>@@ | Toggle children              |
+| @@html:<kbd>@@   ⌫ @@html:</kbd>@@ or @@html:<kbd>@@ DEL @@html:</kbd>@@ | Delete watcher               |
+
+*** Registers buffer
+| Keybinding                         | Description                                                                         |
+|------------------------------------+-------------------------------------------------------------------------------------|
+| @@html:<kbd>@@   f @@html:</kbd>@@ | Change format                                                                       |
+| @@html:<kbd>@@ SPC @@html:</kbd>@@ | Create watcher (prompt with @@html:<kbd>@@ Shift @@html:</kbd>@@)                   |
+| @@html:<kbd>@@ RET @@html:</kbd>@@ | Create watcher and select window (prompt with @@html:<kbd>@@ Shift @@html:</kbd>@@) |
+
+*** Disassembly buffer
+| Keybinding                         | Description                                                                         |
+|------------------------------------+-------------------------------------------------------------------------------------|
+| @@html:<kbd>@@   f @@html:</kbd>@@ | Change format                                                                       |
 
 ** FAQ
 *** Why rewrite the already existing package that comes with Emacs? @@html:<a name="why-rewrite">@@
@@ -132,7 +184,7 @@ environment you use the rest of the day.
 If you don't use Emacs (but are willing to try it) and you can't find a good graphical debugger for
 Linux, this could be it!
 
-If you are already happy with what you have, then there isn't much to see here. :)
+If you are already happy with what you have, then there isn't much to see here. ☺
 
 *** May I send custom GDB commands?@@html:<a name="gdb-commands">@@
 :PROPERTIES:
