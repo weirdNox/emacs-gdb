@@ -46,7 +46,8 @@ behind rewriting the entire package from scratch).
 - Emacs package *Hydra* is needed for the buffer switcher
 
 *** Package installation
-This package intentionally uses the name ~gdb-mi~ in order to shadow the builtin package.
+This package intentionally uses the name ~gdb-mi~ in order to shadow the builtin package, as it could be
+confusing to have two packages with the same purpose installed.
 
 The easiest way to install it is by using [[https://framagit.org/steckerhalter/quelpa][Quelpa]], which builds the packages for you from any source you
 want.
