@@ -1613,6 +1613,7 @@ stopped thread before running the command. If FORCE-STOPPED is
     (define-key map (kbd "p") #'previous-line)
     (define-key map (kbd "n") #'next-line)
     (define-key map (kbd "f") #'gdb-disassembly-change-format)
+    (define-key map (kbd "F") #'gdb-disassembly-change-flavor)
     map))
 
 (defconst gdb--disassembly-font-lock-keywords
@@ -2528,12 +2529,26 @@ If ARG is `dprintf' create a dprintf breakpoint instead."
    (when (gdb--is-buffer-type 'gdb--disassembly)
      (let ((data (gdb--buffer-get-data))
            (collection '(("Disassembly only" . 0)
-                         ("Disassembly with raw opcodes" . 2)
-                         ("Mixed source and disassembly" . 4)
-                         ("Mixed source and disassembly with raw opcodes" . 5))))
+                           ("Disassembly with raw opcodes" . 2)
+                           ("Mixed source and disassembly" . 4)
+                           ("Mixed source and disassembly with raw opcodes" . 5))))
        (setf (gdb--disassembly-data-mode data) (cdr (assoc (completing-read "Format: " collection nil t)
-                                                           collection))
-             (gdb--disassembly-data-func data) nil)
+                                                             collection)))
+
+       (setf (gdb--disassembly-data-func data) nil)
+       (gdb--disassembly-fetch (gdb--session-selected-frame session))))))
+
+(defun gdb-disassembly-change-flavor ()
+  "Change the disassembly flavor."
+  (interactive)
+  (gdb--with-valid-session
+   (when (gdb--is-buffer-type 'gdb--disassembly)
+     (let ((data (gdb--buffer-get-data))
+           (collection '(("Intel" . "intel") ("AT&T"  . "att"))))
+       (gdb--command (concat "-gdb-set disassembly-flavor "
+                             (cdr (assoc (completing-read "Flavor: " collection nil t) collection))))
+
+       (setf (gdb--disassembly-data-func data) nil)
        (gdb--disassembly-fetch (gdb--session-selected-frame session))))))
 
 (defun gdb-table-toggle ()

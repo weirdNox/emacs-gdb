@@ -153,9 +153,10 @@ Nevertheless, even without the global minor mode, every buffer has some keybindi
 | @@html:<kbd>@@ RET @@html:</kbd>@@ | Create watcher and select window (prompt with @@html:<kbd>@@ Shift @@html:</kbd>@@) |
 
 *** Disassembly buffer
-| Keybinding                         | Description                                                                         |
-|------------------------------------+-------------------------------------------------------------------------------------|
-| @@html:<kbd>@@   f @@html:</kbd>@@ | Change format                                                                       |
+| Keybinding                       | Description   |
+|----------------------------------+---------------|
+| @@html:<kbd>@@ f @@html:</kbd>@@ | Change format |
+| @@html:<kbd>@@ F @@html:</kbd>@@ | Change flavor |
 
 ** FAQ
 *** Why rewrite the already existing package that comes with Emacs? @@html:<a name="why-rewrite">@@
@@ -195,7 +196,7 @@ You may send any GDB command you want.
 /However/, keep in mind that if:
 - the command does not use the background form (eg. ~continue&~), it *will block GDB* until it finishes
   what it is doing, so you won't be able to interact with it! If you want to interrupt it, run
-  ~comint-interrupt-subjob~ in the interaction buffer (bound to @@html:<kbd>@@ C-c C-c @@html:</kbd>@@)
+  ~comint-interrupt-subjob~ in the command shell buffer (bound to @@html:<kbd>@@ C-c C-c @@html:</kbd>@@).
 
 - the command does not cause GDB to notify the interface of the changes it made, the interface may become
   out of sync and start giving errors
