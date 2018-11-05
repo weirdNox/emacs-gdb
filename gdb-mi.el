@@ -33,7 +33,7 @@
 (require 'hydra)
 
 (eval-and-compile
-  (let* ((default-directory (file-name-directory (or load-file-name default-directory)))
+  (let* ((default-directory (file-name-directory (or load-file-name byte-compile-current-file default-directory)))
          (required-module (concat "gdb-module" module-file-suffix)))
     (if (file-exists-p required-module)
         (require 'gdb-module required-module)
@@ -250,8 +250,8 @@ dynamic module.")
 (cl-defstruct gdb--frame thread level addr func file line from variables)
 
 (cl-defstruct gdb--breakpoint
-  number type disp enabled addr hits ignore-count what thread
-  pending condition file gdb-fullname line func overlays)
+  session number type disp enabled addr hits ignore-count what
+  thread pending condition file gdb-fullname line func overlays)
 (defconst gdb--available-breakpoint-types
   '(("Breakpoint" . "")
     ("Temporary Breakpoint" . "-t ")
@@ -273,6 +273,8 @@ breakpoint of TYPE.")
   (hide-access-spec gdb-watchers-hide-access-specifiers))
 (defvar gdb--sessions nil
   "List of active sessions.")
+(defvar gdb--session nil
+  "Let-bound chosen session.")
 
 (cl-defstruct gdb--buffer-info session type thread update-func data)
 (defvar-local gdb--buffer-info nil
@@ -390,7 +392,8 @@ All embedded quotes, newlines, and backslashes are preceded with a backslash."
 ;; ------------------------------------------------------------------------------------------
 ;; Session management
 (defsubst gdb--infer-session (&optional only-from-buffer)
-  (or (and (gdb--buffer-info-p gdb--buffer-info)
+  (or (and (not only-from-buffer) gdb--session)
+      (and (gdb--buffer-info-p gdb--buffer-info)
            (gdb--session-p (gdb--buffer-info-session gdb--buffer-info))
            (gdb--buffer-info-session gdb--buffer-info))
       (and (not only-from-buffer)
@@ -408,12 +411,31 @@ All embedded quotes, newlines, and backslashes are preceded with a backslash."
 
 (defmacro gdb--with-valid-session (&rest body)
   (declare (debug ([&optional stringp] body)))
-  (let ((message (and (stringp (car body)) (car body))))
-    (when message (setq body (cdr body)))
-    `(let ((session (gdb--infer-session)))
+  (let ((message (and (stringp (car body)) (pop body))))
+    `(let* ((session (gdb--infer-session))
+            (gdb--session session))
        (if (gdb--valid-session session)
            (progn ,@body)
          ,(when message `(error "%s" ,message))))))
+
+(defun gdb--session-name (session)
+  (let ((debuggee (gdb--session-debuggee-path session)))
+    (concat "Session " (if (stringp debuggee)
+                           (concat "debugging " (abbreviate-file-name debuggee))
+                         "without debuggee"))))
+
+(defmacro gdb--after-choosing-session (&rest body)
+  (declare (debug (body)))
+  `(let* ((collection (cl-loop for session in gdb--sessions
+                               collect (cons (gdb--session-name session) session)))
+          (session (or (gdb--infer-session)
+                       (if (= (length gdb--sessions) 1)
+                           (car gdb--sessions)
+                         (cdr (assoc-string (completing-read "Which session? " collection nil t nil nil)
+                                            collection)))))
+          (gdb--session session))
+     (when (gdb--valid-session session)
+       ,@body)))
 
 (defun gdb--kill-session (session)
   (when (and (gdb--session-p session) (memq session gdb--sessions))
@@ -715,7 +737,14 @@ When the thread is switched, the current frame will also be changed."
 ;; ------------------------------------------------------------------------------------------
 ;; Tables
 (cl-defstruct gdb--table header rows (num-rows 0) column-sizes target-line start-line)
-(cl-defstruct gdb--table-row table columns properties level has-children)
+(cl-defstruct gdb--table-row table columns properties level has-children children-func)
+
+(eval-when-compile
+  (defvar gdb-table-mouse-map
+    (let ((map (make-sparse-keymap)))
+      (suppress-keymap map t)
+      (define-key map (kbd "<mouse-1>") #'gdb-table-mouse-toggle)
+      map)))
 
 (defsubst gdb--pad-string (string padding)
   (if (= padding 0)
@@ -752,7 +781,7 @@ the inserted row. Returns table."
         ((eq (type-of table-or-parent) 'gdb--table-row) (gdb--table-row-table table-or-parent))
         (t   (error "Unexpected table-or-argument type."))))
 
-(defun gdb--table-add-row (table-or-parent columns &optional properties has-children)
+(defun gdb--table-add-row (table-or-parent columns &optional properties has-children children-func)
   "Add a row of COLUMNS, a list of strings, to TABLE-OR-PARENT and recalculate column sizes.
 When non-nil, PROPERTIES will be added to the whole row when printing.
 TABLE-OR-PARENT should be a table or a table row, which, in the latter case, will be made the parent of
@@ -763,7 +792,7 @@ HAS-CHILDREN should be t when this node has children."
          (level (or (and parent (1+ (gdb--table-row-level parent))) 0))
 
          (row (make-gdb--table-row :table table :columns columns :properties properties :level level
-                                   :has-children has-children)))
+                                   :has-children has-children :children-func children-func)))
 
     (gdb--table-update-column-sizes table columns level has-children)
     (setf (gdb--table-rows table) (append (gdb--table-rows table) (list row))
@@ -773,7 +802,8 @@ HAS-CHILDREN should be t when this node has children."
 
     row))
 
-(defun gdb--table-row-string (columns column-sizes sep &optional with-newline properties level has-children)
+(defun gdb--table-row-string (columns column-sizes sep &optional with-newline properties level has-children
+                                      children-func)
   (apply #'propertize (cl-loop
                        for string in columns
                        and size   in column-sizes
@@ -781,13 +811,17 @@ HAS-CHILDREN should be t when this node has children."
                        unless first concat sep into result
                        concat (gdb--pad-string
                                (concat (and first (make-string (* (or level 0) 4) ? ))
-                                       (and first (cond ((eq has-children t)     "[+] ")
-                                                        ((eq has-children 'open) "[-] ")))
+                                       (and first (cond ((eq has-children t)
+                                                         (eval-when-compile
+                                                           (propertize "[+] " 'keymap gdb-table-mouse-map)))
+                                                        ((eq has-children 'open)
+                                                         (eval-when-compile
+                                                           (propertize "[-] " 'keymap gdb-table-mouse-map)))))
                                        string)
                                size)
                        into result
                        finally return (concat result (and with-newline "\n")))
-         properties))
+         (append properties (when (functionp children-func) (list 'gdb--table-fetch-func children-func)))))
 
 (defun gdb--table-insert (table &optional sep)
   "Erase buffer and insert TABLE with columns separated with SEP (space as default).
@@ -805,7 +839,8 @@ If WITH-HEADER is set, then the first row is used as header."
              when (= row-number (gdb--table-num-rows table)) do (setq insert-newline nil)
              do (insert (gdb--table-row-string (gdb--table-row-columns    row) column-sizes sep insert-newline
                                                (gdb--table-row-properties row) (gdb--table-row-level row)
-                                               (gdb--table-row-has-children row))))
+                                               (gdb--table-row-has-children row)
+                                               (gdb--table-row-children-func row))))
 
     (let ((buffer (current-buffer))
           (start-line  (gdb--table-start-line  table))
@@ -1148,16 +1183,16 @@ stopped thread before running the command. If FORCE-STOPPED is
                 (addr  (and instr (gdb--disassembly-instr-addr instr))))
            (when addr (format "*%s" addr))))))
 
-(defun gdb--infer-breakpoint ()
-  (gdb--with-valid-session
-   (cond ((or (buffer-file-name)
-              (gdb--is-buffer-type 'gdb--disassembly))
-          (let ((pos (line-beginning-position)))
-            (cl-loop for  overlay   in (overlays-in (1- pos) (1+ pos))
-                     for  breakpoint = (overlay-get overlay 'gdb--breakpoint)
-                     when breakpoint return breakpoint)))
-         ((gdb--is-buffer-type 'gdb--breakpoints)
-          (get-text-property (line-beginning-position) 'gdb--breakpoint)))))
+(defun gdb--infer-breakpoint (&optional session)
+  (cond ((or (buffer-file-name)
+             (gdb--is-buffer-type 'gdb--disassembly))
+         (let ((pos (line-beginning-position)))
+           (cl-loop for  overlay   in (overlays-in (1- pos) (1+ pos))
+                    for  breakpoint = (overlay-get overlay 'gdb--breakpoint)
+                    when (and breakpoint (or (not session) (eq session (gdb--breakpoint-session breakpoint))))
+                    return breakpoint)))
+        ((gdb--is-buffer-type 'gdb--breakpoints)
+         (get-text-property (line-beginning-position) 'gdb--breakpoint))))
 
 (defun gdb--infer-breakpoint-location (breakpoint)
   (when breakpoint
@@ -1433,8 +1468,8 @@ stopped thread before running the command. If FORCE-STOPPED is
     (define-key map (kbd        "d") #'gdb-watcher-duplicate)
     (define-key map (kbd        "h") #'gdb-watcher-toggle-hold-frame)
     (define-key map (kbd        "t") #'gdb-watchers-toggle-access-specifiers)
-    (define-key map (kbd      "SPC") #'gdb-watcher-toggle)
-    (define-key map (kbd      "TAB") #'gdb-watcher-toggle)
+    (define-key map (kbd      "SPC") #'gdb-table-toggle)
+    (define-key map (kbd      "TAB") #'gdb-table-toggle)
     (define-key map (kbd      "DEL") #'gdb-watcher-delete)
     (define-key map (kbd "<delete>") #'gdb-watcher-delete)
     map))
@@ -1447,11 +1482,24 @@ stopped thread before running the command. If FORCE-STOPPED is
 (gdb--simple-get-buffer gdb--watchers gdb--watchers-update "Watchers" nil
   (gdb-watchers-mode))
 
+(defun gdb--watcher-toggle-chilren ()
+  (gdb--with-valid-session
+   (let ((watcher (get-text-property (line-beginning-position) 'gdb--watcher)))
+     (when (and watcher (> (gdb--watcher-children-count watcher) 0))
+       (if (and (setf (gdb--watcher-open watcher) (not (gdb--watcher-open watcher)))
+                (not  (gdb--watcher-children watcher)))
+           (gdb--command (concat "-var-list-children --simple-values " (gdb--watcher-name watcher))
+                         (cons 'gdb--context-watcher-list-children watcher))
+
+         (cl-pushnew (current-buffer) (gdb--session-buffers-to-update session))
+         (gdb--update))))))
+
 (defun gdb--watcher-draw (table-or-parent watcher tick watcher-at-start watcher-under-cursor)
   (let* ((out-of-scope (eq (gdb--watcher-flag watcher) 'out-of-scope))
          (expr (concat (gdb--add-face (gdb--watcher-expr watcher) 'gdb-variable-face)
                        (when (and (gdb--watcher-thread-id watcher) (not (gdb--watcher-parent watcher)))
                          (eval-when-compile (propertize " HOLD" 'face 'gdb-watcher-hold-face)))))
+         (children (gdb--watcher-children watcher))
          (row (gdb--table-add-row
                table-or-parent
                (list expr (gdb--add-face (gdb--watcher-type watcher) 'gdb-type-face)
@@ -1460,8 +1508,7 @@ stopped thread before running the command. If FORCE-STOPPED is
                        (gdb--add-face (gdb--watcher-value watcher)
                                       (and (eq (gdb--watcher-flag watcher) tick) 'gdb-modified-face))))
                (list 'gdb--watcher watcher)
-               (and (not out-of-scope) (> (gdb--watcher-children-count watcher) 0))))
-         (children (gdb--watcher-children watcher)))
+               (and (not out-of-scope) (> (gdb--watcher-children-count watcher) 0)) #'gdb--watcher-toggle-chilren)))
 
     (when (eq watcher watcher-at-start)
       (let ((table (gdb--get-table-from-table-or-parent table-or-parent)))
@@ -1474,6 +1521,7 @@ stopped thread before running the command. If FORCE-STOPPED is
     (when (and (not out-of-scope) (gdb--watcher-open watcher))
       (cl-loop for child in children
                do (gdb--watcher-draw row child tick watcher-at-start watcher-under-cursor)))))
+
 
 (defun gdb--watchers-update ()
   (gdb--with-valid-session
@@ -1852,7 +1900,7 @@ it from the list."
           (existing-breakpoint (cl-loop for breakpoint in (gdb--session-breakpoints session)
                                         when (= number (gdb--breakpoint-number breakpoint))
                                         return breakpoint))
-          (breakpoint (or existing-breakpoint (make-gdb--breakpoint))))
+          (breakpoint (or existing-breakpoint (make-gdb--breakpoint :session session))))
 
      (if existing-breakpoint
          (gdb--breakpoint-remove-symbol existing-breakpoint)
@@ -2057,21 +2105,6 @@ it from the list."
        (gdb--command (format "-var-create - %c \"%s\"" (if hold-thread ?* ?@) expression)
                      (cons 'gdb--context-watcher-create (vector expression watcher-to-replace stack-depth))
                      (or hold-frame (gdb--session-selected-frame session)))))))
-
-(defun gdb-watcher-toggle ()
-  "Toggle watcher under cursor's children visibility"
-  (interactive)
-  (gdb--with-valid-session
-   (when (gdb--is-buffer-type 'gdb--watchers)
-     (let ((watcher (get-text-property (line-beginning-position) 'gdb--watcher)))
-       (when (and watcher (> (gdb--watcher-children-count watcher) 0))
-         (when (and (setf (gdb--watcher-open watcher) (not (gdb--watcher-open watcher)))
-                    (not  (gdb--watcher-children watcher)))
-           (gdb--command (concat "-var-list-children --simple-values " (gdb--watcher-name watcher))
-                         (cons 'gdb--context-watcher-list-children watcher)))
-
-         (cl-pushnew 'gdb--watchers (gdb--session-buffer-types-to-update session))
-         (gdb--update))))))
 
 (defun gdb-watcher-assign ()
   "Assign a value to the watched expression."
@@ -2407,19 +2440,18 @@ _i_nferior i/o  |  _f_rames   |  _d_isassembly  |  _w_atcher    |  ^ ^         |
 When ARG is non-nil, prompt for additional breakpoint settings.
 If ARG is `dprintf' create a dprintf breakpoint instead."
   (interactive "P")
-  (gdb--with-valid-session
-   (let ((breakpoint-on-point (gdb--infer-breakpoint))
+  (gdb--after-choosing-session
+   (let ((breakpoint-on-point (gdb--infer-breakpoint session))
          (location (gdb--point-location))
          (dprintf (eq arg 'dprintf))
-         type thread ignore-count condition format-args location-input)
+         type thread ignore-count condition format-args)
      (when (and (not location) breakpoint-on-point)
        (setq location (gdb--infer-breakpoint-location breakpoint-on-point)))
 
-     (when arg
+     (when (or arg (not location))
        (unless (string= (or location "")
-                        (setq location-input (read-string (concat "Location: ") location)))
-         (setq location location-input
-               breakpoint-on-point nil))
+                        (setq location (read-string (concat "Location: ") location)))
+         (setq breakpoint-on-point nil))
 
        (when breakpoint-on-point
          (setq thread       (gdb--breakpoint-thread       breakpoint-on-point)
@@ -2503,6 +2535,21 @@ If ARG is `dprintf' create a dprintf breakpoint instead."
                                                            collection))
              (gdb--disassembly-data-func data) nil)
        (gdb--disassembly-fetch (gdb--session-selected-frame session))))))
+
+(defun gdb-table-toggle ()
+  (interactive)
+  (let ((func (get-text-property (point) 'gdb--table-fetch-func)))
+    (when func (funcall func))))
+
+(defun gdb-table-mouse-toggle (event)
+  (interactive "e")
+  (let ((window (posn-window (event-end event)))
+        (pos (posn-point (event-end event)))
+        func)
+    (when (windowp window)
+      (select-window window)
+      (goto-char pos)
+      (when (setq func (get-text-property pos 'gdb--table-fetch-func)) (funcall func)))))
 
 (defun gdb-setup-windows (&optional session)
   "Setup windows in the main frame."
