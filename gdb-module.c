@@ -82,7 +82,7 @@ u32 plugin_is_GPL_compatible;
     ; // Weird indentation...
 
 #define internVariableWriter(Name, ...) static emacs_value Name;
-#define internSetterWriter(Name, ElispName) Name = intern(Env, #ElispName);
+#define internSetterWriter(Name, ElispName) Name = Env->make_global_ref(Env, intern(Env, #ElispName));
 
 interns(internVariableWriter);
 

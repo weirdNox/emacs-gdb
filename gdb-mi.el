@@ -34,14 +34,18 @@
 
 (eval-and-compile
   (unless (bound-and-true-p module-file-suffix) (error "Dynamic modules are NOT supported in your build of Emacs"))
+
   (let* ((default-directory (file-name-directory (or load-file-name byte-compile-current-file default-directory)))
-         (required-module (concat "gdb-module" module-file-suffix)))
+         (required-module (concat "gdb-module" module-file-suffix))
+         (path-to-module  (concat default-directory required-module)))
+
     (if (file-exists-p required-module)
-        (require 'gdb-module required-module)
+        (require 'gdb-module path-to-module)
+
       (message "Compiling GDB dynamic module...")
       (with-current-buffer (compile (concat "make -k " required-module))
-        (add-hook 'compilation-finish-functions
-                  (lambda (_buffer _status) (require 'gdb-module required-module)) nil t)))))
+        (add-hook 'compilation-finish-functions (lambda (_buffer _status) (require 'gdb-module path-to-module))
+                  nil t)))))
 
 (declare-function gdb--handle-mi-output "ext:gdb-module")
 
@@ -1085,7 +1089,8 @@ If WITH-HEADER is set, then the first row is used as header."
 (defun gdb--output-filter (string)
   "Parse GDB/MI output."
   (gdb--debug-execute-body 'raw-output (message "%s" string))
-  (let ((output (gdb--measure-time "Handle MI Output" (gdb--handle-mi-output string))))
+  (let* ((gc-cons-threshold most-positive-fixnum)
+         (output (gdb--measure-time "Handle MI Output" (gdb--handle-mi-output string))))
     (gdb--update)
     (gdb--debug-execute-body '(timings commands raw-output)
       (message "--------------------"))
