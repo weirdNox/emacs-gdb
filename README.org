@@ -67,10 +67,20 @@ to prevent confusion:
 #+END_SRC
 
 Here is an example configuration using ~use-package~:
-#+BEGIN_SRC elisp
+#+BEGIN_SRC emacs-lisp
 (use-package gdb-mi :quelpa (gdb-mi :fetcher git
                                     :url "https://github.com/weirdNox/emacs-gdb.git"
                                     :files ("*.el" "*.c" "*.h" "Makefile"))
+  :init
+  (fmakunbound 'gdb)
+  (fmakunbound 'gdb-enable-debug))
+#+END_SRC
+
+You may also do everything manually or use another package manager that supports Git repos. Example for
+~straight.el~:
+#+BEGIN_SRC emacs-lisp
+(use-package gdb-mi
+  :straight (:host github :repo "weirdNox/emacs-gdb" :files ("*.el" "*.c" "*.h" "Makefile"))
   :init
   (fmakunbound 'gdb)
   (fmakunbound 'gdb-enable-debug))
