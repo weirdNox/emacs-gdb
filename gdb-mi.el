@@ -2559,7 +2559,7 @@ If ARG is `dprintf' create a dprintf breakpoint instead."
 
 (defun gdb-table-toggle ()
   (interactive)
-  (let ((func (get-text-property (point) 'gdb--table-fetch-func)))
+  (let ((func (get-text-property (line-beginning-position) 'gdb--table-fetch-func)))
     (when func (funcall func))))
 
 (defun gdb-table-mouse-toggle (event)
