@@ -836,15 +836,15 @@ HAS-CHILDREN should be t when this node has children."
          (append properties (when (functionp children-func) (list 'gdb--table-fetch-func children-func)))))
 
 (defun gdb--table-insert (table &optional sep)
-  "Erase buffer and insert TABLE with columns separated with SEP (space as default).
-If WITH-HEADER is set, then the first row is used as header."
+  "Erase buffer and insert TABLE with columns separated with SEP (space as default)."
   (let ((column-sizes (gdb--table-column-sizes table))
         (sep (or sep " ")))
     (erase-buffer)
 
     (when (gdb--table-header table)
       (setq-local header-line-format
-                  (list " " (gdb--table-row-string (gdb--table-header table) column-sizes sep))))
+                  (list (if (display-images-p) " " "  ")
+                        (gdb--table-row-string (gdb--table-header table) column-sizes sep))))
 
     (cl-loop for row in (gdb--table-rows table)
              for row-number from 1 with insert-newline = t
@@ -890,7 +890,12 @@ If WITH-HEADER is set, then the first row is used as header."
                   ,@body
                   ,(if important
                        '(add-hook 'kill-buffer-hook #'gdb--important-buffer-kill-cleanup nil t)
-                     '(add-hook 'kill-buffer-hook #'gdb--buffer-kill-cleanup nil t)))
+                     '(add-hook 'kill-buffer-hook #'gdb--buffer-kill-cleanup nil t))
+
+                  (if (display-images-p)
+                      (setq left-fringe-width 8)
+                    (setq left-margin-width 2)))
+
                 (gdb--update-buffer buffer)
                 buffer)))))
 
