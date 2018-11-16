@@ -102,7 +102,8 @@ This can also be set to t, which means that all debug components are active."
 
 ;; ------------------------------------------------------------------------------------------
 ;; Faces and bitmaps
-(define-fringe-bitmap 'gdb--fringe-breakpoint "\x3c\x7e\xff\xff\xff\xff\x7e\x3c")
+(when (display-images-p)
+  (define-fringe-bitmap 'gdb--fringe-breakpoint "\x3c\x7e\xff\xff\xff\xff\x7e\x3c"))
 
 (defgroup gdb-faces nil
   "Faces in the GDB graphical interface"
@@ -974,6 +975,7 @@ If WITH-HEADER is set, then the first row is used as header."
   (let ((frame (make-frame `((fullscreen . maximized)
                              (gdb--session . ,session)))))
     (setf (gdb--session-frame session) frame)
+    (select-frame-set-input-focus frame)
     (gdb--rename-frame frame)
     frame))
 
