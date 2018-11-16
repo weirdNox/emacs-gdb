@@ -82,6 +82,12 @@ This can be changed in a debugging session with the command `gdb-watchers-toggle
   :type  'boolean
   :version "26.1")
 
+(defcustom gdb-ignore-gdbinit t
+  "When non-nil, use the flag \"-nx\" which makes GDB ignore .gdbinit."
+  :group 'gdb
+  :type  'boolean
+  :version "26.1")
+
 (defcustom gdb-debug nil
   "List of debug symbols, which will enable different components.
 Possible values are:
@@ -1076,7 +1082,9 @@ If WITH-HEADER is set, then the first row is used as header."
 
 (gdb--simple-get-buffer gdb--comint ignore "Comint" t
   (gdb-comint-mode)
-  (let ((process-connection-type nil)) (make-comint-in-buffer "GDB" buffer "gdb" nil "-i=mi" "-nx"))
+  (let ((process-connection-type nil))
+    (make-comint-in-buffer "GDB" buffer "gdb" nil "-i=mi"
+                           (if gdb-ignore-gdbinit "-nx" "")))
 
   (let ((proc (get-buffer-process buffer)))
     (set-process-sentinel proc #'gdb--comint-sentinel)
