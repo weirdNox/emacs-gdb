@@ -231,7 +231,6 @@ This can also be set to t, which means that all debug components are active."
     gdb--context-persist-thread
     gdb--context-get-data ;; Data: Result name string
     gdb--context-ignore-errors
-    gdb--context-user-command
     )
   "List of implemented token contexts.
 Must be in the same order of the `token_context' enum in the
@@ -310,7 +309,7 @@ This is shared among all sessions.")
 (defvar gdb--inhibit-display-source nil)
 (defvar gdb--open-buffer-new-frame  nil)
 (defvar gdb--data nil)
-(defvar gdb--omit-console-output t)
+(defvar gdb--omit-console-output nil)
 
 
 ;; ------------------------------------------------------------------------------------------
@@ -1124,7 +1123,7 @@ HAS-CHILDREN should be t when this node has children."
         (setf (gdb--buffer-info-data gdb--buffer-info) cmd))
 
       (setq gdb--omit-console-output nil)
-      (gdb--command (concat "-interpreter-exec console " (gdb--escape-argument cmd)) 'gdb--context-user-command))))
+      (gdb--command (concat "-interpreter-exec console " (gdb--escape-argument cmd))))))
 
 (defun gdb--output-filter (string)
   "Parse GDB/MI output."
@@ -1855,7 +1854,10 @@ it from the list."
                      finally return 0)
             data))))
 
-(defun gdb--log-error (err) (message "GDB Error: %s" err))
+(defun gdb--log-error (err)
+  (let ((session (gdb--infer-session)))
+    (unless (and session (eq (window-buffer (selected-window)) (gdb--comint-get-buffer session)))
+      (message "GDB Error: %s" err))))
 
 (defun gdb--running (thread-id-str)
   (gdb--with-valid-session
@@ -2319,11 +2321,14 @@ If ARG is non-nil, you may modify the watcher expression before creation."
   (interactive)
   (gdb--with-valid-session
    (let* ((frame (or (gdb--session-selected-frame session) (user-error "No frame is selected")))
-          (expression (gdb--read-line "Expression to evaluate: ")))
+          (expression (gdb--read-line "Expression to evaluate: "))
+          result)
      (when expression
-       (message "Result: %s"
-                (gdb--get-data (concat "-data-evaluate-expression " (gdb--escape-argument expression))
-                               "value" frame))))))
+       (setq result (gdb--get-data (concat "-data-evaluate-expression " (gdb--escape-argument expression))
+                                   "value" frame))
+       (if result
+           (message "Result: %s")
+         (user-error "Expression %s not found!" (gdb--escape-argument expression)))))))
 
 (defun gdb-run (&optional arg break-main)
   "Start execution of the inferior from the beginning.

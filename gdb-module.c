@@ -58,6 +58,7 @@ u32 plugin_is_GPL_compatible;
         W(GdbCmd, gdb--command)                                     \
         W(ExtractContext, gdb--extract-context)                     \
         W(SetData, gdb--set-data)                                   \
+        W(Error, error)                                             \
         W(LogError, gdb--log-error)                                 \
                                                                     \
         W(FinalizeUserCmd, gdb--finalize-user-command)              \
@@ -646,6 +647,15 @@ static void disassemble(emacs_env *Env, mi_result *List, emacs_value BuffData) {
     }
 }
 
+static void logError(emacs_env *Env, mi_result *Result, char **PrintString, char *Key) {
+    char *Message = getResultString(Result, Key);
+    if(Message) {
+        bufPrintf(*PrintString, "%s\n(gdb) ", Result->variant.cstring);
+        funcall(Env, LogError, 1, (emacs_value[]){getEmacsString(Env, Message)});
+        funcall(Env, FinalizeUserCmd, 0, 0);
+    }
+}
+
 static void miAsyncStopped(emacs_env *Env, mi_result *Result, char **PrintString) {
     for(mi_result *Iter = Result; Iter; Iter = Iter->next) {
         if(Iter->variable && strcmp(Iter->variable, "stopped-threads") == 0) {
@@ -777,7 +787,6 @@ typedef struct token_context {
         Context_PersistThread,
         Context_GetData,
         Context_IgnoreErrors,
-        Context_UserCommand,
 
         Context_Size,
     } Type;
@@ -895,10 +904,6 @@ static void handleMiResultRecord(emacs_env *Env, mi_result_record *Record, char 
                     funcall(Env, SetData, 1, (emacs_value[]){getEmacsString(Env, String)});
                 } break;
 
-                case Context_UserCommand: {
-                    funcall(Env, FinalizeUserCmd, 0, 0);
-                } break;
-
                 ignoreDefaultCase();
             }
         } break;
@@ -908,13 +913,12 @@ static void handleMiResultRecord(emacs_env *Env, mi_result_record *Record, char 
                 ignoreCase(Context_InitialFile);
                 ignoreCase(Context_IgnoreErrors);
 
-                default: {
-                    char *Message = getResultString(Result, "msg");
-                    if(Message) {
-                        bufPrintf(*PrintString, "%s\n", Result->variant.cstring);
-                        funcall(Env, LogError, 1, (emacs_value[]){getEmacsString(Env, Message)});
-                    }
+                case Context_GetData: {
+                    logError(Env, Result, PrintString, "msg");
+                    funcall(Env, SetData, 1, &Error);
                 } break;
+
+                default: { logError(Env, Result, PrintString, "msg"); } break;
             }
         } break;
 
@@ -958,7 +962,12 @@ static emacs_value handleGdbMiOutput(emacs_env *Env, ptrdiff_t NumberOfArgs,
                 bufPrintf(PrintString, "An error occurred on token %s\n", Output->variant.error.token);
             } break;
 
-            ignoreCase(GDBWIRE_MI_OUTPUT_PROMPT);
+            case GDBWIRE_MI_OUTPUT_PROMPT: {
+                if(!Env->is_not_nil(Env, funcall(Env, Eval, 1, (emacs_value[]){OmitConsoleOutput}))) {
+                    bufPrintf(PrintString, "(gdb) ");
+                    funcall(Env, FinalizeUserCmd, 0, 0);
+                }
+            } break;
         }
     }
     gdbwire_mi_output_free(ParserOutput);
