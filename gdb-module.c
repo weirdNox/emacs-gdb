@@ -52,16 +52,18 @@ u32 plugin_is_GPL_compatible;
         W(Cdr, cdr)                                                 \
         W(VecFunc, vector)                                          \
         W(ListFunc, list)                                           \
-        W(DeleteProcess, delete-process)                            \
+        W(Set, set)                                                 \
         W(Eval, eval)                                               \
+        W(Eq, eq)                                                   \
+        W(DeleteProcess, delete-process)                            \
                                                                     \
         W(GdbCmd, gdb--command)                                     \
         W(ExtractContext, gdb--extract-context)                     \
-        W(SetData, gdb--set-data)                                   \
         W(Error, error)                                             \
         W(LogError, gdb--log-error)                                 \
                                                                     \
-        W(FinalizeUserCmd, gdb--finalize-user-command)              \
+        W(GdbData, gdb--data)                                       \
+        W(ConsoleOutputToData, to-data)                             \
         W(OmitConsoleOutput, gdb--omit-console-output)              \
                                                                     \
         W(SwitchToThread, gdb--switch-to-thread)                    \
@@ -252,6 +254,14 @@ static inline emacs_value funcall(emacs_env *Env, emacs_value Func, u32 NumArgs,
 static inline emacs_value internFuncall(emacs_env *Env, char *Func, u32 NumArgs, emacs_value *Args) {
     emacs_value Result = Env->funcall(Env, intern(Env, Func), NumArgs, Args);
     return Result;
+}
+
+static inline bool isNil(emacs_env *Env, emacs_value Thing) {
+    return !Env->is_not_nil(Env, Thing);
+}
+
+static inline bool isNotNil(emacs_env *Env, emacs_value Thing) {
+    return Env->is_not_nil(Env, Thing);
 }
 
 static void breakpointChange(emacs_env *Env, mi_result *Breakpoint) {
@@ -652,7 +662,7 @@ static void logError(emacs_env *Env, mi_result *Result, char **PrintString, char
     if(Message) {
         bufPrintf(*PrintString, "%s\n(gdb) ", Result->variant.cstring);
         funcall(Env, LogError, 1, (emacs_value[]){getEmacsString(Env, Message)});
-        funcall(Env, FinalizeUserCmd, 0, 0);
+        funcall(Env, Set, 2, (emacs_value[]){OmitConsoleOutput, T});
     }
 }
 
@@ -748,13 +758,35 @@ static void handleMiOobRecord(emacs_env *Env, mi_oob_record *Record, char **Prin
             mi_stream_record *StreamRecord = Record->variant.stream_record;
             switch(StreamRecord->kind) {
                 case GDBWIRE_MI_CONSOLE: {
-                    if(!Env->is_not_nil(Env, funcall(Env, Eval, 1, (emacs_value[]){OmitConsoleOutput}))) {
+                    emacs_value Omit = funcall(Env, Eval, 1, (emacs_value[]){OmitConsoleOutput});
+                    if(isNil(Env, funcall(Env, Eval, 1, (emacs_value[]){OmitConsoleOutput}))) {
                         bufPrintf(*PrintString, "%s", StreamRecord->cstring);
+                    }
+                    else if(funcall(Env, Eq, 2, (emacs_value[]){Omit, ConsoleOutputToData})) {
+                        emacs_value *Array = 0;
+
+                        emacs_value UserPtr = funcall(Env, Eval, 1, (emacs_value[]){GdbData});
+                        bool UserPtrExists = isNotNil(Env, UserPtr);
+                        if(UserPtrExists) {
+                            Array = Env->get_user_ptr(Env, UserPtr);
+                        }
+
+                        if(StreamRecord->cstring) {
+                            // NOTE(nox): Remove newlines
+                            StreamRecord->cstring[strlen(StreamRecord->cstring) - 1] = 0;
+                        }
+                        bufPush(Array, getEmacsString(Env, StreamRecord->cstring));
+                        if(UserPtrExists) {
+                            Env->set_user_ptr(Env, UserPtr, Array);
+                        }
+                        else {
+                            UserPtr = Env->make_user_ptr(Env, 0, Array);
+                            funcall(Env, Set, 2, (emacs_value[]){GdbData, UserPtr});
+                        }
                     }
                 } break;
 
                 case GDBWIRE_MI_TARGET: {
-                    // TODO(nox): If we are outputting to another tty, will we ever receive this?
                     bufPrintf(*PrintString, "Target: %s", StreamRecord->cstring);
                 } break;
 
@@ -786,6 +818,7 @@ typedef struct token_context {
         Context_Disassemble,
         Context_PersistThread,
         Context_GetData,
+        Context_GetConsoleData,
         Context_IgnoreErrors,
 
         Context_Size,
@@ -901,7 +934,21 @@ static void handleMiResultRecord(emacs_env *Env, mi_result_record *Record, char 
                     char *String = getResultString(Result, Key);
                     free(Key);
 
-                    funcall(Env, SetData, 1, (emacs_value[]){getEmacsString(Env, String)});
+                    funcall(Env, Set, 2, (emacs_value[]){GdbData, getEmacsString(Env, String)});
+                } break;
+
+                case Context_GetConsoleData: {
+                    emacs_value UserPtr = funcall(Env, Eval, 1, (emacs_value[]){GdbData});
+                    if(isNotNil(Env, UserPtr)) {
+                        emacs_value *Array = Env->get_user_ptr(Env, UserPtr);
+                        emacs_value List = funcall(Env, ListFunc, bufLen(Array), Array);
+                        bufFree(Array);
+                        funcall(Env, Set, 2, (emacs_value[]){GdbData, List});
+                    } else {
+                        funcall(Env, Set, 2, (emacs_value[]){GdbData, T});
+                    }
+
+                    funcall(Env, Set, 2, (emacs_value[]){OmitConsoleOutput, T});
                 } break;
 
                 ignoreDefaultCase();
@@ -914,8 +961,19 @@ static void handleMiResultRecord(emacs_env *Env, mi_result_record *Record, char 
                 ignoreCase(Context_IgnoreErrors);
 
                 case Context_GetData: {
+                    emacs_value UserPtr = funcall(Env, Eval, 1, (emacs_value[]){GdbData});
+                    if(isNotNil(Env, UserPtr)) {
+                        emacs_value *Array = Env->get_user_ptr(Env, UserPtr);
+                        bufFree(Array);
+                    }
+                    funcall(Env, Set, 2, (emacs_value[]){GdbData, Error});
+                    funcall(Env, Set, 2, (emacs_value[]){OmitConsoleOutput, T});
                     logError(Env, Result, PrintString, "msg");
-                    funcall(Env, SetData, 1, &Error);
+                } break;
+
+                case Context_GetConsoleData: {
+                    funcall(Env, Set, 2, (emacs_value[]){GdbData, Error});
+                    logError(Env, Result, PrintString, "msg");
                 } break;
 
                 default: { logError(Env, Result, PrintString, "msg"); } break;
@@ -963,9 +1021,9 @@ static emacs_value handleGdbMiOutput(emacs_env *Env, ptrdiff_t NumberOfArgs,
             } break;
 
             case GDBWIRE_MI_OUTPUT_PROMPT: {
-                if(!Env->is_not_nil(Env, funcall(Env, Eval, 1, (emacs_value[]){OmitConsoleOutput}))) {
+                if(isNil(Env, funcall(Env, Eval, 1, (emacs_value[]){OmitConsoleOutput}))) {
                     bufPrintf(PrintString, "(gdb) ");
-                    funcall(Env, FinalizeUserCmd, 0, 0);
+                    funcall(Env, Set, 2, (emacs_value[]){OmitConsoleOutput, T});
                 }
             } break;
         }

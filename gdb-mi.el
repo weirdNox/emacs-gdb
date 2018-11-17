@@ -230,6 +230,7 @@ This can also be set to t, which means that all debug components are active."
     gdb--context-disassemble ;; Data: BufferData
     gdb--context-persist-thread
     gdb--context-get-data ;; Data: Result name string
+    gdb--context-get-console-data
     gdb--context-ignore-errors
     )
   "List of implemented token contexts.
@@ -504,6 +505,17 @@ ARGS-TO-COMMAND are passed to `gdb--command', after the context."
    (apply 'gdb--command command (cons 'gdb--context-get-data key) args-to-command)
    (while (not gdb--data) (accept-process-output (gdb--session-process session) 0.5))
    (when (stringp gdb--data) gdb--data)))
+
+(defun gdb--get-console-data (command &rest args-to-command)
+  "Synchronously retrieve output from command. Each line will turn into a string in a list.
+ARGS-TO-COMMAND are passed to `gdb--command', after the context."
+  (gdb--with-valid-session
+   (setq gdb--data nil
+         gdb--omit-console-output 'to-data)
+   (apply 'gdb--command command 'gdb--context-get-console-data args-to-command)
+   (while (or (not gdb--data) (user-ptrp gdb--data))
+     (accept-process-output (gdb--session-process session) 0.5))
+   (when (listp gdb--data) gdb--data)))
 
 
 ;; ------------------------------------------------------------------------------------------
@@ -1098,9 +1110,11 @@ HAS-CHILDREN should be t when this node has children."
 (define-derived-mode gdb-comint-mode comint-mode "GDB Comint"
   "Major mode for interacting with GDB."
   (setq-local comint-input-sender #'gdb--comint-sender)
-  (setq-local comint-preoutput-filter-functions '(gdb--output-filter)))
+  (setq-local comint-preoutput-filter-functions '(gdb--output-filter))
+  (setq-local completion-at-point-functions '(gdb--comint-completion-at-point)))
 
 (gdb--simple-get-buffer gdb--comint ignore "Comint" t
+  (setq gdb--omit-console-output nil)
   (gdb-comint-mode)
   (let ((process-connection-type nil))
     (make-comint-in-buffer "GDB" buffer "gdb" nil "-i=mi"
@@ -1198,6 +1212,18 @@ stopped thread before running the command. If FORCE-STOPPED is
 
      (when (and stopped-thread (not (eq force-stopped 'no-resume)))
        (gdb--command "-exec-continue" nil stopped-thread)))))
+
+(defun gdb--comint-completion-at-point ()
+  (let* ((real-beg (comint-line-beginning-position)) (end (point-max))
+         (str (buffer-substring-no-properties real-beg end)))
+    (unless (= real-beg end)
+      (setq beg (string-match " [^ ]+" str)
+            beg (or (and beg (+ real-beg 1 beg)) real-beg))
+      (list beg end
+            (completion-table-dynamic (lambda (_)
+                                        (let ((raw-list (gdb--get-console-data (concat "complete " str))))
+                                          (cl-loop for item in raw-list
+                                                   collect (substring item (- beg real-beg))))))))))
 
 
 ;; ------------------------------------------------------------------------------------------
@@ -2107,10 +2133,6 @@ it from the list."
 (defun gdb--persist-thread ()
   (gdb--with-valid-session (setf (gdb--session-persist-thread session) t)))
 
-(defun gdb--set-data (result) (setq gdb--data (or result 'no-data)))
-
-(defun gdb--finalize-user-command () (setq gdb--omit-console-output t))
-
 ;; ------------------------------------------------------------------------------------------
 ;; Global minor mode
 (define-minor-mode gdb-keys-mode
@@ -2637,27 +2659,26 @@ If ARG is `dprintf' create a dprintf breakpoint instead."
 (defun gdb-create-session ()
   "Create GDB session. This will not associate any target with it."
   (interactive)
-  (let* ((session (make-gdb--session))
-         (frame (gdb--create-frame session)))
-    (push session gdb--sessions)
+  (let ((gdb--session (make-gdb--session)))
+    (push gdb--session gdb--sessions)
+    (gdb--create-frame gdb--session)
 
-    (with-selected-frame frame ;; NOTE(nox): In order to have a session available
-      ;; NOTE(nox): Create essential buffers
-      (gdb--comint-get-buffer session)
-      (gdb--inferior-io-get-buffer session)
+    ;; NOTE(nox): Create essential buffers
+    (gdb--comint-get-buffer gdb--session)
+    (gdb--inferior-io-get-buffer gdb--session)
 
-      ;; NOTE(nox): Essential settings
-      (gdb--command "-gdb-set mi-async on")
-      (gdb--command "-gdb-set non-stop on"))
+    ;; NOTE(nox): Essential settings
+    (gdb--command "-gdb-set mi-async on")
+    (gdb--command "-gdb-set non-stop on")
 
-    (gdb-setup-windows session)
+    (gdb-setup-windows gdb--session)
     (when gdb-enable-global-keybindings
       (gdb-keys-mode))
 
     (add-hook 'delete-frame-functions #'gdb--handle-delete-frame)
     (add-hook 'window-configuration-change-hook #'gdb--rename-frame)
 
-    session))
+    gdb--session))
 
 ;;;###autoload
 (defun gdb-executable ()
