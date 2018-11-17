@@ -59,6 +59,9 @@ u32 plugin_is_GPL_compatible;
         W(SetData, gdb--set-data)                                   \
         W(LogError, gdb--log-error)                                 \
                                                                     \
+        W(SwitchToThread, gdb--switch-to-thread)                    \
+        W(SwitchToFrame, gdb--switch-to-frame)                      \
+                                                                    \
         W(SetInitialFile, gdb--set-initial-file)                    \
         W(RunningFunc, gdb--running)                                \
         W(GetThreadInfo, gdb--get-thread-info)                      \
@@ -683,6 +686,25 @@ static void handleMiOobRecord(emacs_env *Env, mi_oob_record *Record, char **Prin
                             char *ThreadId = getResultString(Result, "id");
                             emacs_value Args[] = {getEmacsString(Env, ThreadId), Nil, Nil, Nil, Nil};
                             funcall(Env, UpdateThread, arrayCount(Args), Args);
+                        } break;
+
+                        case GDBWIRE_MI_ASYNC_THREAD_SELECTED: {
+                            char *Id = getResultString(Result, "id");
+                            mi_result *Frame = getResultTuple(Result, "frame");
+
+                            if(Frame) {
+                                char *ArgsStrings[] = {Id, getResultString(Frame, "level")};
+                                emacs_value ConsArgs[arrayCount(ArgsStrings)] = {};
+                                getEmacsStrings(Env, ArgsStrings, ConsArgs, arrayCount(ArgsStrings), false);
+
+                                emacs_value FrameCons = funcall(Env, Cons, arrayCount(ConsArgs), ConsArgs);
+                                emacs_value Args[arrayCount(ArgsStrings)] = {FrameCons, T};
+                                funcall(Env, SwitchToFrame, arrayCount(Args), Args);
+                            }
+                            else {
+                                emacs_value Args[] = {getEmacsString(Env, Id), T};
+                                funcall(Env, SwitchToThread, arrayCount(Args), Args);
+                            }
                         } break;
 
                         case GDBWIRE_MI_ASYNC_THREAD_EXITED: {

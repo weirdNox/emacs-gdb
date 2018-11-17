@@ -639,10 +639,14 @@ that are not created by GDB."
                      when (and (gdb--frame-file frame) (gdb--frame-line frame)) return frame))
           fallback))))
 
+;; NOTE(nox): Called from the dynamic module
 (defun gdb--switch-to-thread (thread &optional auto)
   "Unconditionally switch to _different_ THREAD. This will also switch to the most relevant frame.
-THREAD may be nil, which means to remove the selected THREAD."
+THREAD may be nil, which means to remove the selected THREAD.
+THREAD may also be an ID string."
   (gdb--with-valid-session
+   (when (stringp thread) (setq thread (gdb--get-thread-by-id (string-to-number thread))))
+
    (unless (eq thread (gdb--session-selected-thread session))
      (setf (gdb--session-selected-thread session) thread)
 
@@ -664,11 +668,19 @@ THREAD may be nil, which means to remove the selected THREAD."
      (cl-pushnew 'gdb--frames    (gdb--session-buffer-types-to-update session))
      (cl-pushnew 'gdb--registers (gdb--session-buffer-types-to-update session)))))
 
+;; NOTE(nox): Called from the dynamic module
 (defun gdb--switch-to-frame (frame &optional auto)
   "Unconditionally switch to a _different_ FRAME.
 When FRAME is in a different thread, switch to it.
+FRAME may also be (ThreadIdString . LevelString).
 When FRAME is `deselect-frame', then deselect the current frame but keep the selected thread."
   (gdb--with-valid-session
+   (when (consp frame)
+     (let ((thread (gdb--get-thread-by-id (string-to-number (car frame))))
+           (level  (string-to-number (cdr frame))))
+       (setq frame (cl-loop for frame in (gdb--thread-frames thread)
+                            when (= (gdb--frame-level frame) level) return frame))))
+
    (let ((keep-thread (eq frame 'deselect-frame)))
      (setq frame (if keep-thread nil frame))
 
