@@ -2327,7 +2327,7 @@ If ARG is non-nil, you may modify the watcher expression before creation."
        (setq result (gdb--get-data (concat "-data-evaluate-expression " (gdb--escape-argument expression))
                                    "value" frame))
        (if result
-           (message "Result: %s")
+           (message "Result: %s" result)
          (user-error "Expression %s not found!" (gdb--escape-argument expression)))))))
 
 (defun gdb-run (&optional arg break-main)
