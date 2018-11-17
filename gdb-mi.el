@@ -34,19 +34,19 @@
 
 (eval-and-compile
   (unless (bound-and-true-p module-file-suffix)
-    (error "Dynamic modules are NOT supported in your build of Emacs"))
+    (error "Dynamic modules are NOT supported in your build of Emacs")))
 
-  (let* ((default-directory (file-name-directory (or byte-compile-current-file load-file-name default-directory)))
-         (required-module (concat "gdb-module" module-file-suffix))
-         (path-to-module  (concat default-directory required-module)))
+(let* ((default-directory (file-name-directory (or load-file-name default-directory)))
+       (required-module (concat "gdb-module" module-file-suffix))
+       (path-to-module  (concat default-directory required-module)))
 
-    (if (file-exists-p required-module)
-        (require 'gdb-module path-to-module)
+  (if (file-exists-p required-module)
+      (require 'gdb-module path-to-module)
 
-      (message "Compiling GDB dynamic module...")
-      (with-current-buffer (compile (concat "make -k " required-module))
-        (add-hook 'compilation-finish-functions (lambda (_buffer _status) (require 'gdb-module path-to-module))
-                  nil t)))))
+    (message "Compiling GDB dynamic module...")
+    (with-current-buffer (compile (concat "make -k " required-module))
+      (add-hook 'compilation-finish-functions
+                (lambda (_buffer _status) (require 'gdb-module path-to-module)) nil t))))
 
 (declare-function gdb--handle-mi-output "ext:gdb-module")
 
@@ -1215,16 +1215,19 @@ stopped thread before running the command. If FORCE-STOPPED is
        (gdb--command "-exec-continue" nil stopped-thread)))))
 
 (defun gdb--comint-completion-at-point ()
-  (let* ((real-beg (comint-line-beginning-position)) (end (point-max))
-         (str (buffer-substring-no-properties real-beg end)))
-    (unless (= real-beg end)
-      (setq beg (string-match " [^ ]+" str)
-            beg (or (and beg (+ real-beg 1 beg)) real-beg))
-      (list beg end
-            (completion-table-dynamic (lambda (_)
-                                        (let ((raw-list (gdb--get-console-data (concat "complete " str))))
-                                          (cl-loop for item in raw-list
-                                                   collect (substring item (- beg real-beg))))))))))
+  (let* ((beg (comint-line-beginning-position)) (end (point-max))
+         (str (buffer-substring-no-properties beg end))
+         (relevant-index (string-match "\\( [^ .*]+\\|\\(\\.\\|\\*\\)[^ .]*\\)$" str)))
+    (unless (= beg end)
+      (when relevant-index
+        (setq relevant-index (1+ relevant-index)
+              beg (+ beg relevant-index)))
+
+      (list beg end (completion-table-dynamic
+                     (lambda (_)
+                       (let ((raw-list (gdb--get-console-data (concat "complete " str))))
+                         (cl-loop for item in raw-list
+                                  collect (substring item relevant-index)))))))))
 
 
 ;; ------------------------------------------------------------------------------------------
