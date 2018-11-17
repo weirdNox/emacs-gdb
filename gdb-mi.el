@@ -2685,13 +2685,13 @@ If ARG is `dprintf' create a dprintf breakpoint instead."
     gdb--session))
 
 ;;;###autoload
-(defun gdb-executable ()
-  "Start debugging an executable in the current session.
+(defun gdb-executable (debuggee-path)
+  "Start debugging an executable at DEBUGGEE-PATH in the current session.
 If no session is available, one is automatically created."
-  (interactive)
-  (let ((debuggee-path (expand-file-name (read-file-name "Select executable to debug: " nil
-                                                         gdb--previous-executable t nil 'file-executable-p)))
-        (session (or (gdb--infer-session) (gdb-create-session))))
+  (interactive
+   (list (expand-file-name (read-file-name "Select executable to debug: " nil
+                                           gdb--previous-executable t nil 'file-executable-p))))
+  (let ((session (or (gdb--infer-session) (gdb-create-session))))
     (setq gdb--previous-executable debuggee-path)
     (setf (gdb--session-debuggee-path session) debuggee-path)
 
