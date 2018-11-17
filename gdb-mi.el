@@ -1099,7 +1099,9 @@ HAS-CHILDREN should be t when this node has children."
   "Send user commands from comint."
   (if (gdb--debug-check 'raw-input)
       (gdb--command string nil)
-    (gdb--command (concat "-interpreter-exec console " (gdb--escape-argument string)))))
+    (let ((command (if (> (length string) 0) string (or (gdb--buffer-get-data) ""))))
+    (gdb--command (concat "-interpreter-exec console " (gdb--escape-argument command)))
+    (setf (gdb--buffer-info-data gdb--buffer-info) command))))
 
 (defun gdb--output-filter (string)
   "Parse GDB/MI output."
