@@ -53,11 +53,15 @@ u32 plugin_is_GPL_compatible;
         W(VecFunc, vector)                                          \
         W(ListFunc, list)                                           \
         W(DeleteProcess, delete-process)                            \
+        W(Eval, eval)                                               \
                                                                     \
         W(GdbCmd, gdb--command)                                     \
         W(ExtractContext, gdb--extract-context)                     \
         W(SetData, gdb--set-data)                                   \
         W(LogError, gdb--log-error)                                 \
+                                                                    \
+        W(FinalizeUserCmd, gdb--finalize-user-command)              \
+        W(OmitConsoleOutput, gdb--omit-console-output)              \
                                                                     \
         W(SwitchToThread, gdb--switch-to-thread)                    \
         W(SwitchToFrame, gdb--switch-to-frame)                      \
@@ -734,7 +738,9 @@ static void handleMiOobRecord(emacs_env *Env, mi_oob_record *Record, char **Prin
             mi_stream_record *StreamRecord = Record->variant.stream_record;
             switch(StreamRecord->kind) {
                 case GDBWIRE_MI_CONSOLE: {
-                    bufPrintf(*PrintString, "%s", StreamRecord->cstring);
+                    if(!Env->is_not_nil(Env, funcall(Env, Eval, 1, (emacs_value[]){OmitConsoleOutput}))) {
+                        bufPrintf(*PrintString, "%s", StreamRecord->cstring);
+                    }
                 } break;
 
                 case GDBWIRE_MI_TARGET: {
@@ -771,6 +777,7 @@ typedef struct token_context {
         Context_PersistThread,
         Context_GetData,
         Context_IgnoreErrors,
+        Context_UserCommand,
 
         Context_Size,
     } Type;
@@ -886,6 +893,10 @@ static void handleMiResultRecord(emacs_env *Env, mi_result_record *Record, char 
                     free(Key);
 
                     funcall(Env, SetData, 1, (emacs_value[]){getEmacsString(Env, String)});
+                } break;
+
+                case Context_UserCommand: {
+                    funcall(Env, FinalizeUserCmd, 0, 0);
                 } break;
 
                 ignoreDefaultCase();

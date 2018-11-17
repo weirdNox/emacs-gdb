@@ -231,6 +231,7 @@ This can also be set to t, which means that all debug components are active."
     gdb--context-persist-thread
     gdb--context-get-data ;; Data: Result name string
     gdb--context-ignore-errors
+    gdb--context-user-command
     )
   "List of implemented token contexts.
 Must be in the same order of the `token_context' enum in the
@@ -309,6 +310,7 @@ This is shared among all sessions.")
 (defvar gdb--inhibit-display-source nil)
 (defvar gdb--open-buffer-new-frame  nil)
 (defvar gdb--data nil)
+(defvar gdb--omit-console-output t)
 
 
 ;; ------------------------------------------------------------------------------------------
@@ -1109,13 +1111,20 @@ HAS-CHILDREN should be t when this node has children."
     (set-process-sentinel proc #'gdb--comint-sentinel)
     (setf (gdb--session-process session) proc)))
 
-(defun gdb--comint-sender (_process string)
+(defun gdb--comint-sender (process string)
   "Send user commands from comint."
   (if (gdb--debug-check 'raw-input)
       (gdb--command string nil)
-    (let ((command (if (> (length string) 0) string (or (gdb--buffer-get-data) ""))))
-    (gdb--command (concat "-interpreter-exec console " (gdb--escape-argument command)))
-    (setf (gdb--buffer-info-data gdb--buffer-info) command))))
+    (let* ((use-default (= (length string) 0))
+           (cmd (if use-default (or (gdb--buffer-get-data) "") string))
+           comint-preoutput-filter-functions)
+      (if use-default
+          (progn (delete-char -1)
+                 (comint-output-filter process (concat cmd "\n")))
+        (setf (gdb--buffer-info-data gdb--buffer-info) cmd))
+
+      (setq gdb--omit-console-output nil)
+      (gdb--command (concat "-interpreter-exec console " (gdb--escape-argument cmd)) 'gdb--context-user-command))))
 
 (defun gdb--output-filter (string)
   "Parse GDB/MI output."
@@ -2097,6 +2106,8 @@ it from the list."
   (gdb--with-valid-session (setf (gdb--session-persist-thread session) t)))
 
 (defun gdb--set-data (result) (setq gdb--data (or result 'no-data)))
+
+(defun gdb--finalize-user-command () (setq gdb--omit-console-output t))
 
 ;; ------------------------------------------------------------------------------------------
 ;; Global minor mode
