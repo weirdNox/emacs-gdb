@@ -1850,10 +1850,6 @@ When FORCE is non-nil, it will display it, even if the window does not exist and
      (when (window-live-p window)
        (set-window-dedicated-p window nil)
 
-       (if (display-images-p)
-           (set-window-fringes window 8)
-         (set-window-margins window 2))
-
        (when (and (not gdb--inhibit-display-source) buffer)
          (set-window-buffer window buffer)
          (when line
@@ -1861,7 +1857,11 @@ When FORCE is non-nil, it will display it, even if the window does not exist and
              (goto-char (point-min))
              (forward-line (1- line))
              (recenter))
-           (gdb--place-symbol session buffer line '((type . source-indicator)))))))))
+           (gdb--place-symbol session buffer line '((type . source-indicator)))))
+
+       (if (display-images-p)
+           (set-window-fringes window 8)
+         (set-window-margins window 2))))))
 
 
 ;; ------------------------------------------------------------------------------------------
