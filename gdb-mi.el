@@ -1057,12 +1057,13 @@ HAS-CHILDREN should be t when this node has children."
       (goto-char (point-min))
       (forward-line (1- line))
       (beginning-of-line)
-      (cond ((eq where 'top)    (recenter 0))
-            ((eq where 'center) (recenter))
-            ((eq where 'bottom) (recenter -1))
-            ((eq where 'top-if-invisible)
-             (unless (pos-visible-in-window-p (point))
-               (recenter 0)))))))
+      (let (recenter-redisplay)
+        (cond ((eq where 'top)    (recenter 0))
+              ((eq where 'center) (recenter))
+              ((eq where 'bottom) (recenter -1))
+              ((eq where 'top-if-invisible)
+               (unless (pos-visible-in-window-p (point))
+                 (recenter 0))))))))
 
 (defun gdb--scroll-buffer-to-last-line (buffer &optional where)
   (with-current-buffer buffer
@@ -1073,9 +1074,10 @@ HAS-CHILDREN should be t when this node has children."
     (with-selected-window window
       (forward-line most-positive-fixnum)
       (beginning-of-line)
-      (cond ((eq where 'top)    (recenter 0))
-            ((eq where 'center) (recenter))
-            ((eq where 'bottom) (recenter -1))))))
+      (let (recenter-redisplay)
+        (cond ((eq where 'top)    (recenter 0))
+              ((eq where 'center) (recenter))
+              ((eq where 'bottom) (recenter -1)))))))
 
 
 ;; ------------------------------------------------------------------------------------------
@@ -1788,7 +1790,8 @@ When FORCE is non-nil, it will display it, even if the window does not exist and
           (line (cond ((and (not (eq override-line 'no-mark)) override-line))
                       (frame (gdb--frame-line frame))))
           (buffer (and file (gdb--find-file file)))
-          (window (gdb--session-source-window session)))
+          (window (gdb--session-source-window session))
+          recenter-redisplay)
 
      (unless (or (window-live-p window) (and (not force) (gdb--disassembly-is-visible)))
        (setq window (gdb--create-frame-for-buffer session (gdb--comint-get-buffer session)))
