@@ -33,9 +33,10 @@
 (require 'hydra)
 
 (eval-and-compile
-  (unless (bound-and-true-p module-file-suffix) (error "Dynamic modules are NOT supported in your build of Emacs"))
+  (unless (bound-and-true-p module-file-suffix)
+    (error "Dynamic modules are NOT supported in your build of Emacs"))
 
-  (let* ((default-directory (file-name-directory (or load-file-name byte-compile-current-file default-directory)))
+  (let* ((default-directory (file-name-directory (or byte-compile-current-file load-file-name default-directory)))
          (required-module (concat "gdb-module" module-file-suffix))
          (path-to-module  (concat default-directory required-module)))
 
