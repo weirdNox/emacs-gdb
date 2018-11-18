@@ -1051,8 +1051,7 @@ HAS-CHILDREN should be t when this node has children."
       (gdb--set-window-buffer middle-right (gdb--frames-get-buffer session))
       (gdb--set-window-buffer bottom-left  (gdb--watchers-get-buffer session))
       (gdb--set-window-buffer bottom-right (gdb--variables-get-buffer session))
-      (setf (gdb--session-source-window session) top-left)
-      (gdb--display-source-buffer))))
+      (gdb--display-source-buffer top-left))))
 
 (defun gdb--switch-buffer (buffer-fun)
   (gdb--with-valid-session
@@ -1825,14 +1824,18 @@ stopped thread before running the command. If FORCE-STOPPED is
 
 ;; ------------------------------------------------------------------------------------------
 ;; Source buffers
-(defun gdb--display-source-buffer (&optional override-file override-line force)
+(defun gdb--display-source-buffer (&optional force override-file override-line)
   "Display buffer of the selected source, and mark the current line.
+When FORCE is non-nil, the source window will be created and shown.
+FORCE may be the new window to display the source buffer.
+
 The source file and line are fetched from the selected frame, unless OVERRIDE-FILE and OVERRIDE-LINE are set,
 in which case those will be used.
-OVERRIDE-LINE may also be `no-mark', which forces it to not mark any line.
-When FORCE is non-nil, it will display it, even if the window does not exist and a disassembly buffer is visible."
+OVERRIDE-LINE may also be `no-mark', which forces it to not mark any line."
   (gdb--with-valid-session
    (gdb--remove-all-symbols session 'source-indicator t)
+
+   (when (window-live-p force) (setf (gdb--session-source-window session) force))
 
    (let* ((frame (gdb--session-selected-frame session))
           (file (cond (override-file)
@@ -1843,7 +1846,8 @@ When FORCE is non-nil, it will display it, even if the window does not exist and
           (window (gdb--session-source-window session))
           recenter-redisplay)
 
-     (unless (or (window-live-p window) (and (not force) (gdb--disassembly-is-visible)))
+     (when (and (not (window-live-p window))
+                (or force (and buffer (not (gdb--disassembly-is-visible)))))
        (setq window (gdb--create-frame-for-buffer session (gdb--comint-get-buffer session)))
        (setf (gdb--session-source-window session) window))
 
@@ -1910,7 +1914,7 @@ it from the list."
        (cl-pushnew 'gdb--frames  (gdb--session-buffer-types-to-update session))))))
 
 (defun gdb--set-initial-file (file)
-  (gdb--display-source-buffer (gdb--complete-path file) 'no-mark))
+  (gdb--display-source-buffer nil (gdb--complete-path file) 'no-mark))
 
 (defun gdb--get-thread-info (&optional id-str)
   (gdb--command (concat "-thread-info " id-str) 'gdb--context-thread-info))
@@ -2514,7 +2518,7 @@ _i_nferior i/o  |  _f_rames   |  _d_isassembly  |  _w_atcher    |  ^ ^         |
   ("r" (gdb--switch-buffer 'gdb--registers-get-buffer))
   ("s" (progn (setf (gdb--session-source-window (gdb--infer-session)) (and (not gdb--open-buffer-new-frame)
                                                                            (selected-window)))
-              (gdb--display-source-buffer nil nil t)))
+              (gdb--display-source-buffer t)))
   ("<f12>" (setq gdb--open-buffer-new-frame (not gdb--open-buffer-new-frame)) :exit nil))
 
 (defun gdb-toggle-breakpoint (&optional arg)
