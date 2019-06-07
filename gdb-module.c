@@ -851,7 +851,7 @@ static void handleMiResultRecord(emacs_env *Env, mi_result_record *Record, char 
         case GDBWIRE_MI_CONNECTED: {
             switch(Context.Type) {
                 case Context_TtySet: {
-                    if(Context.Data != Nil) {
+                    if(isNotNil(Env, Context.Data)) {
                         funcall(Env, DeleteProcess, 1, (emacs_value[]){Context.Data});
                     }
                 } break;
