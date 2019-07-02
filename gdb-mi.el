@@ -89,6 +89,12 @@ This can be changed in a debugging session with the command `gdb-watchers-toggle
   :type  'boolean
   :version "26.1")
 
+(defcustom gdb-executable-name "gdb"
+  "GDB executable name or path."
+  :group 'gdb
+  :type  'string
+  :version "26.2")
+
 (defcustom gdb-debug nil
   "List of debug symbols, which will enable different components.
 Possible values are:
@@ -1117,7 +1123,7 @@ HAS-CHILDREN should be t when this node has children."
   (setq gdb--omit-console-output nil)
   (gdb-comint-mode)
   (let ((process-connection-type nil))
-    (make-comint-in-buffer "GDB" buffer "gdb" nil "-i=mi"
+    (make-comint-in-buffer "GDB" buffer gdb-executable-name nil "-i=mi"
                            (if gdb-ignore-gdbinit "-nx" "")))
 
   (let ((proc (get-buffer-process buffer)))
