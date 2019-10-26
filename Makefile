@@ -8,7 +8,7 @@ gdb-module.so: gdb-module.c emacs-module.h gdbwire.c
 	$(CC) -Wall -Wextra -Wno-unused-parameter $(RELEASE_FLAGS) -fPIC -shared $< -o $@
 
 testbed.out: testbed.c
-	$(CC) $(DEBUG_FLAGS) -lpthread $< -o $@
+	$(CC) $(DEBUG_FLAGS) $< -lpthread -o $@
 
 clean:
 	rm -f *.out *.so *.elc
