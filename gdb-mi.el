@@ -317,6 +317,7 @@ This is shared among all sessions.")
 (defvar gdb--inhibit-display-source nil)
 (defvar gdb--open-buffer-new-frame  nil)
 (defvar gdb--data nil)
+(defvar gdb--user-ptr nil)
 (defvar gdb--omit-console-output nil)
 
 

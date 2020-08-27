@@ -63,6 +63,7 @@ u32 plugin_is_GPL_compatible;
         W(LogError, gdb--log-error)                                 \
                                                                     \
         W(GdbData, gdb--data)                                       \
+        W(GdbUserPtr, gdb--user-ptr)                                \
         W(ConsoleOutputToData, to-data)                             \
         W(OmitConsoleOutput, gdb--omit-console-output)              \
                                                                     \
@@ -759,13 +760,14 @@ static void handleMiOobRecord(emacs_env *Env, mi_oob_record *Record, char **Prin
             switch(StreamRecord->kind) {
                 case GDBWIRE_MI_CONSOLE: {
                     emacs_value Omit = funcall(Env, Eval, 1, (emacs_value[]){OmitConsoleOutput});
-                    if(isNil(Env, funcall(Env, Eval, 1, (emacs_value[]){OmitConsoleOutput}))) {
+
+                    if(isNil(Env, Omit)) {
                         bufPrintf(*PrintString, "%s", StreamRecord->cstring);
                     }
                     else if(funcall(Env, Eq, 2, (emacs_value[]){Omit, ConsoleOutputToData})) {
                         emacs_value *Array = 0;
 
-                        emacs_value UserPtr = funcall(Env, Eval, 1, (emacs_value[]){GdbData});
+                        emacs_value UserPtr = funcall(Env, Eval, 1, (emacs_value[]){GdbUserPtr});
                         bool UserPtrExists = isNotNil(Env, UserPtr);
                         if(UserPtrExists) {
                             Array = Env->get_user_ptr(Env, UserPtr);
@@ -781,7 +783,7 @@ static void handleMiOobRecord(emacs_env *Env, mi_oob_record *Record, char **Prin
                         }
                         else {
                             UserPtr = Env->make_user_ptr(Env, 0, Array);
-                            funcall(Env, Set, 2, (emacs_value[]){GdbData, UserPtr});
+                            funcall(Env, Set, 2, (emacs_value[]){GdbUserPtr, UserPtr});
                         }
                     }
                 } break;
@@ -938,11 +940,12 @@ static void handleMiResultRecord(emacs_env *Env, mi_result_record *Record, char 
                 } break;
 
                 case Context_GetConsoleData: {
-                    emacs_value UserPtr = funcall(Env, Eval, 1, (emacs_value[]){GdbData});
+                    emacs_value UserPtr = funcall(Env, Eval, 1, (emacs_value[]){GdbUserPtr});
                     if(isNotNil(Env, UserPtr)) {
                         emacs_value *Array = Env->get_user_ptr(Env, UserPtr);
                         emacs_value List = funcall(Env, ListFunc, bufLen(Array), Array);
                         bufFree(Array);
+                        funcall(Env, Set, 2, (emacs_value[]){GdbUserPtr, Nil});
                         funcall(Env, Set, 2, (emacs_value[]){GdbData, List});
                     } else {
                         funcall(Env, Set, 2, (emacs_value[]){GdbData, T});
@@ -961,17 +964,18 @@ static void handleMiResultRecord(emacs_env *Env, mi_result_record *Record, char 
                 ignoreCase(Context_IgnoreErrors);
 
                 case Context_GetData: {
-                    emacs_value UserPtr = funcall(Env, Eval, 1, (emacs_value[]){GdbData});
-                    if(isNotNil(Env, UserPtr)) {
-                        emacs_value *Array = Env->get_user_ptr(Env, UserPtr);
-                        bufFree(Array);
-                    }
                     funcall(Env, Set, 2, (emacs_value[]){GdbData, Error});
                     funcall(Env, Set, 2, (emacs_value[]){OmitConsoleOutput, T});
                     logError(Env, Result, PrintString, "msg");
                 } break;
 
                 case Context_GetConsoleData: {
+                    emacs_value UserPtr = funcall(Env, Eval, 1, (emacs_value[]){GdbUserPtr});
+                    if(isNotNil(Env, UserPtr)) {
+                        emacs_value *Array = Env->get_user_ptr(Env, UserPtr);
+                        bufFree(Array);
+                        funcall(Env, Set, 2, (emacs_value[]){GdbUserPtr, Nil});
+                    }
                     funcall(Env, Set, 2, (emacs_value[]){GdbData, Error});
                     logError(Env, Result, PrintString, "msg");
                 } break;
