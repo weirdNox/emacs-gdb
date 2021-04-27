@@ -1,5 +1,5 @@
 DEBUG_FLAGS = -DDEBUG -O0 -g3
-RELEASE_FLAGS = -O2
+RELEASE_FLAGS = -O2 -g3
 
 all: testbed.out gdb-module.so
 .PHONY: all

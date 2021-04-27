@@ -1124,7 +1124,7 @@ HAS-CHILDREN should be t when this node has children."
   (setq gdb--omit-console-output nil)
   (gdb-comint-mode)
   (let ((process-connection-type nil))
-    (make-comint-in-buffer "GDB" buffer gdb-executable-name nil "-i=mi"
+    (make-comint-in-buffer "GDB" buffer gdb-executable-name nil "-i=mi2"
                            (if gdb-ignore-gdbinit "-nx" "")))
 
   (let ((proc (get-buffer-process buffer)))
