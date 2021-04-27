@@ -264,7 +264,12 @@ dynamic module.")
 
 (cl-defstruct gdb--thread
   id target-id name state frames core
-  (registers-tick most-negative-fixnum) registers (registers-format "N"))
+  (registers-tick most-negative-fixnum) registers
+  ;; NOTE(nox): This was previously "N" for natural representation.
+  ;; However, gdb/mpfr/gmp/guile/libgc have a bug in which the garbage collector deallocates a block
+  ;; twice, resulting in a crash with the error "Duplicate large block deallocation".
+  ;; It seems defaulting to hexadecimal representation makes it less probable to occur...
+  (registers-format "x"))
 
 (cl-defstruct gdb--variable name type value)
 (cl-defstruct gdb--frame thread level addr func file line from variables)
