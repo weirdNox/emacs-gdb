@@ -290,6 +290,7 @@ breakpoint of TYPE.")
               thread-id stack-depth)
 
 (cl-defstruct gdb--session
+  handling-output buffered-output
   frame process buffers source-window debuggee-path debuggee-args
   buffer-types-to-update buffers-to-update
   threads selected-thread persist-thread selected-frame
@@ -1151,15 +1152,31 @@ HAS-CHILDREN should be t when this node has children."
       (setq gdb--omit-console-output nil)
       (gdb--command (concat "-interpreter-exec console " (gdb--escape-argument cmd))))))
 
-(defun gdb--output-filter (string)
+(defun gdb--output-filter (mi-output)
   "Parse GDB/MI output."
-  (gdb--debug-execute-body 'raw-output (message "%s" string))
-  (let* ((gc-cons-threshold most-positive-fixnum)
-         (output (gdb--measure-time "Handle MI Output" (gdb--handle-mi-output string))))
-    (gdb--update)
-    (gdb--debug-execute-body '(timings commands raw-output)
-      (message "--------------------"))
-    output))
+  (gdb--with-valid-session
+   (setf (gdb--session-buffered-output session) (concat (gdb--session-buffered-output session)
+                                                        mi-output))
+   (let ((gc-cons-threshold most-positive-fixnum)
+         str-to-process (output ""))
+     (unless (gdb--session-handling-output session)
+       (unwind-protect
+           (progn
+             (setf (gdb--session-handling-output session) t)
+
+             (while (gdb--session-buffered-output session)
+               (setq str-to-process (gdb--session-buffered-output session))
+               (setf (gdb--session-buffered-output session) nil)
+
+               (gdb--debug-execute-body 'raw-output (message "%s" str-to-process))
+               (setq output (concat output
+                                    (gdb--measure-time "Handle MI Output" (gdb--handle-mi-output str-to-process))))
+               (gdb--update)
+               (gdb--debug-execute-body '(timings commands raw-output)
+                 (message "--------------------"))))
+
+         (setf (gdb--session-handling-output session) nil)))
+     output)))
 
 (defun gdb--comint-sentinel (process str)
   "Handle GDB comint process state changes."
