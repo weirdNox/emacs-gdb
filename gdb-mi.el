@@ -29,6 +29,7 @@
 ;; ------------------------------------------------------------------------------------------
 ;; Package and related things
 (require 'cl-lib)
+(require 'subr-x)
 (require 'comint)
 (require 'hydra)
 
@@ -1280,11 +1281,13 @@ stopped thread before running the command. If FORCE-STOPPED is
 
 (defun gdb--point-location ()
   "Return a GDB-readable location of the point, in a source file or special buffer."
-  (cond ((buffer-file-name) (format "%s:%d" (buffer-file-name) (gdb--current-line)))
-        ((gdb--is-buffer-type 'gdb--disassembly)
-         (let* ((instr (get-text-property (line-beginning-position) 'gdb--instr))
-                (addr  (and instr (gdb--disassembly-instr-addr instr))))
-           (when addr (format "*%s" addr))))))
+  (if-let (file-name (buffer-file-name))
+      (format "%s:%d" (or (file-remote-p file-name 'localname) file-name) (gdb--current-line))
+
+    (when (gdb--is-buffer-type 'gdb--disassembly)
+      (let* ((instr (get-text-property (line-beginning-position) 'gdb--instr))
+             (addr  (and instr (gdb--disassembly-instr-addr instr))))
+        (when addr (format "*%s" addr))))))
 
 (defun gdb--infer-breakpoint (&optional session)
   (cond ((or (buffer-file-name)
