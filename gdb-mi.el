@@ -914,17 +914,17 @@ HAS-CHILDREN should be t when this node has children."
            return buffer
            finally return nil))
 
-(defmacro gdb--simple-get-buffer (type update-func name important &rest body)
+(defmacro gdb--simple-get-buffer (type update-func name important hidden &rest body)
   "Simple buffer creator/fetcher, for buffers that should be unique in a session."
   (declare (indent defun) (debug (sexp sexp body)))
   (unless (memq type gdb--buffer-types) (error "Type %s does not exist" (symbol-name type)))
   `(defun ,(intern (concat (symbol-name type) "-get-buffer")) (session)
      ,(concat "Creator and fetcher of buffer with type `" (symbol-name type) "'")
      (cond ((gdb--get-buffer-with-type session ',type))
-           (t (let ((buffer (generate-new-buffer "*GDB Temporary Name*")))
+           (t (let ((buffer (generate-new-buffer " *GDB Temporary Name*")))
                 (push buffer (gdb--session-buffers session))
                 (with-current-buffer buffer
-                  (gdb--rename-buffer ,name (gdb--session-debuggee-path session))
+                  (gdb--rename-buffer ,name ,hidden (gdb--session-debuggee-path session))
                   (setq gdb--buffer-info (make-gdb--buffer-info :session session :type ',type
                                                                 :update-func #',update-func))
                   ,@body
@@ -960,9 +960,9 @@ HAS-CHILDREN should be t when this node has children."
      (setf (gdb--session-buffers-to-update session) nil
            (gdb--session-buffer-types-to-update session) nil))))
 
-(defmacro gdb--rename-buffer (&optional specific-str debuggee-path)
+(defmacro gdb--rename-buffer (&optional specific-str hidden debuggee-path)
   `(save-match-data
-     (rename-buffer (concat ,(concat "*GDB" (when specific-str (concat ": " specific-str)))
+     (rename-buffer (concat ,(concat (and hidden " ") "*GDB" (when specific-str (concat ": " specific-str)))
                             (when ,debuggee-path (concat " - " (file-name-nondirectory ,debuggee-path)))
                             "*")
                     t)))
@@ -1127,7 +1127,7 @@ HAS-CHILDREN should be t when this node has children."
   (setq-local comint-preoutput-filter-functions '(gdb--output-filter))
   (setq-local completion-at-point-functions '(gdb--comint-completion-at-point)))
 
-(gdb--simple-get-buffer gdb--comint ignore "Comint" t
+(gdb--simple-get-buffer gdb--comint ignore "Comint" t t
   (setq gdb--omit-console-output nil)
   (gdb-comint-mode)
   (let ((process-connection-type nil))
@@ -1317,7 +1317,7 @@ stopped thread before running the command. If FORCE-STOPPED is
   "Major mode for interacting with the inferior."
   :syntax-table nil :abbrev-table nil)
 
-(gdb--simple-get-buffer gdb--inferior-io ignore "Inferior I/O" t
+(gdb--simple-get-buffer gdb--inferior-io ignore "Inferior I/O" t nil
   (gdb-inferior-io-mode)
   (gdb--inferior-io-initialization))
 
@@ -1399,7 +1399,7 @@ stopped thread before running the command. If FORCE-STOPPED is
   (buffer-disable-undo)
   (font-lock-mode -1))
 
-(gdb--simple-get-buffer gdb--threads gdb--threads-update "Threads" nil
+(gdb--simple-get-buffer gdb--threads gdb--threads-update "Threads" nil t
   (gdb-threads-mode))
 
 (defun gdb--threads-update ()
@@ -1448,7 +1448,7 @@ stopped thread before running the command. If FORCE-STOPPED is
   (buffer-disable-undo)
   (font-lock-mode -1))
 
-(gdb--simple-get-buffer gdb--frames gdb--frames-update "Stack Frames" nil
+(gdb--simple-get-buffer gdb--frames gdb--frames-update "Stack Frames" nil t
   (gdb-frames-mode))
 
 (defun gdb--frames-update ()
@@ -1494,7 +1494,7 @@ stopped thread before running the command. If FORCE-STOPPED is
   (buffer-disable-undo)
   (font-lock-mode -1))
 
-(gdb--simple-get-buffer gdb--breakpoints gdb--breakpoints-update "Breakpoints" nil
+(gdb--simple-get-buffer gdb--breakpoints gdb--breakpoints-update "Breakpoints" nil t
   (gdb-breakpoints-mode))
 
 (defun gdb--breakpoints-update ()
@@ -1542,7 +1542,7 @@ stopped thread before running the command. If FORCE-STOPPED is
   (buffer-disable-undo)
   (font-lock-mode -1))
 
-(gdb--simple-get-buffer gdb--variables gdb--variables-update "Variables" nil
+(gdb--simple-get-buffer gdb--variables gdb--variables-update "Variables" nil t
   (gdb-variables-mode))
 
 (defun gdb--variables-update ()
@@ -1585,7 +1585,7 @@ stopped thread before running the command. If FORCE-STOPPED is
   (buffer-disable-undo)
   (font-lock-mode -1))
 
-(gdb--simple-get-buffer gdb--watchers gdb--watchers-update "Watchers" nil
+(gdb--simple-get-buffer gdb--watchers gdb--watchers-update "Watchers" nil t
   (gdb-watchers-mode))
 
 (defun gdb--watcher-toggle-chilren ()
@@ -1689,7 +1689,7 @@ stopped thread before running the command. If FORCE-STOPPED is
   (buffer-disable-undo)
   (font-lock-mode -1))
 
-(gdb--simple-get-buffer gdb--registers gdb--registers-update "Registers" nil
+(gdb--simple-get-buffer gdb--registers gdb--registers-update "Registers" nil t
   (gdb-registers-mode))
 
 (defun gdb--registers-update ()
@@ -1743,7 +1743,7 @@ stopped thread before running the command. If FORCE-STOPPED is
   (setq-local buffer-read-only t)
   (buffer-disable-undo))
 
-(gdb--simple-get-buffer gdb--disassembly gdb--disassembly-update "Disassembly" nil
+(gdb--simple-get-buffer gdb--disassembly gdb--disassembly-update "Disassembly" nil t
   (gdb-disassembly-mode)
   (setf (gdb--buffer-info-data gdb--buffer-info) (make-gdb--disassembly-data))
   (gdb--disassembly-fetch (gdb--session-selected-frame session)))
