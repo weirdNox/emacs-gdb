@@ -2464,8 +2464,19 @@ If ARG is non-nil, stop all threads unconditionally."
   (interactive)
   (gdb--with-valid-session
    (when (gdb--session-threads session)
-     (gdb--command "kill" nil nil 'no-resume)
-     t)))
+     ;; NOTE(nox): Workaround for GDB bug
+     ;;
+     ;; Due to the non-stop mode, GDB sometimes crashes when rerunning an inferior that was killed while
+     ;; it had some threads running. This ensures all threads are stopped before killing the inferior.
+     ;;
+     (gdb--command "-exec-interrupt --all")
+     (cl-loop do (accept-process-output (gdb--session-process session) 0.5)
+              if (cl-loop for thread in (gdb--session-threads session)
+                          unless (string= "stopped" (gdb--thread-state thread)) return nil
+                          finally return t)
+              return nil)
+
+     (gdb--command "-target-disconnect"))))
 
 (defun gdb-select ()
   "Select inferred frame or thread."
