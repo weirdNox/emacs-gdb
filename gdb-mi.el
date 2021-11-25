@@ -317,6 +317,9 @@ This is shared among all sessions.")
 The alist has the format ((TOKEN . (TYPE . DATA)) ...).
 This is shared among all sessions.")
 
+(defvar gdb--inferior-argument-history nil
+  "History of arguments passed to the inferior.")
+
 (cl-defstruct gdb--disassembly-instr addr func offset instr opcodes)
 (cl-defstruct gdb--disassembly-src   file line-str    instrs)
 (cl-defstruct gdb--disassembly-data (mode 4) func list new widths) ;; NOTE(nox): widths - [addr opcode instr]
@@ -2400,7 +2403,9 @@ If BREAK-MAIN is non-nil, break at main."
   (gdb--with-valid-session
    (when (gdb-kill) (sit-for 0.05))
    (when arg
-     (let ((arguments (read-string "Arguments: " (gdb--session-debuggee-args session))))
+     (let* ((history-add-new-input t)
+            (arguments (read-string "Arguments: " (gdb--session-debuggee-args session)
+                                    'gdb--inferior-argument-history)))
        (setf (gdb--session-debuggee-args session) arguments)
        (gdb--command (concat "-exec-arguments " arguments))))
    (gdb--command (concat "-exec-run" (and break-main " --start")))))
@@ -2476,7 +2481,8 @@ If ARG is non-nil, stop all threads unconditionally."
                           finally return t)
               return nil)
 
-     (gdb--command "-target-disconnect"))))
+     (gdb--command "-target-disconnect")
+     t))) ; NOTE(nox): Some functions need to know if an inferior was killed
 
 (defun gdb-select ()
   "Select inferred frame or thread."
