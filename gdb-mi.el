@@ -295,7 +295,7 @@ breakpoint of TYPE.")
   frame process buffers source-window debuggee-path debuggee-args
   buffer-types-to-update buffers-to-update
   threads selected-thread persist-thread selected-frame
-  breakpoints
+  breakpoints killed-inferior
   (watchers-tick most-negative-fixnum) (watchers (make-hash-table :test 'equal)) root-watchers
   (hide-access-spec gdb-watchers-hide-access-specifiers))
 (defvar gdb--sessions nil
@@ -1993,6 +1993,7 @@ it from the list."
                             thread))))
 
       (t
+       (setf (gdb--session-killed-inferior session) nil) ;; NOTE(nox): Inferior is running, so it is not killed
        (cl-pushnew 'gdb--threads (gdb--session-buffer-types-to-update session))
        (gdb--conditional-switch thread '(no-selected-thread)))))))
 
@@ -2008,7 +2009,8 @@ it from the list."
    (when (eq thread (gdb--session-selected-thread session))
      (cl-pushnew 'gdb--frames (gdb--session-buffer-types-to-update session)))
 
-   (gdb--conditional-switch (gdb--best-frame-to-switch-to thread) '(running same-thread))))
+   (unless (gdb--session-killed-inferior session)
+     (gdb--conditional-switch (gdb--best-frame-to-switch-to thread) '(running same-thread)))))
 
 (defun gdb--breakpoint-changed (number-str type disp enabled-str addr func fullname line-str at
                                            pending thread cond times ignore-count what)
@@ -2474,6 +2476,7 @@ If ARG is non-nil, stop all threads unconditionally."
      ;; Due to the non-stop mode, GDB sometimes crashes when rerunning an inferior that was killed while
      ;; it had some threads running. This ensures all threads are stopped before killing the inferior.
      ;;
+     (setf (gdb--session-killed-inferior session) t)
      (gdb--command "-exec-interrupt --all")
      (cl-loop do (accept-process-output (gdb--session-process session) 0.5)
               if (cl-loop for thread in (gdb--session-threads session)
