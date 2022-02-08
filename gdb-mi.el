@@ -2190,6 +2190,7 @@ it from the list."
             (define-key map (kbd    "<f6>") #'gdb-stop)
             (define-key map (kbd    "<f8>") #'gdb-watcher-add)
             (define-key map (kbd  "<C-f8>") #'gdb-eval-expression)
+            (define-key map (kbd  "<S-f8>") #'gdb-eval-expression-dwim)
             (define-key map (kbd    "<f9>") #'gdb-toggle-breakpoint)
             (define-key map (kbd   "<f10>") #'gdb-next)
             (define-key map (kbd "<M-f10>") #'gdb-next-instruction)
@@ -2383,12 +2384,22 @@ If ARG is non-nil, you may modify the watcher expression before creation."
   (interactive)
   (gdb-create-watcher-from-switch t))
 
+(defun gdb-eval-expression-dwim ()
+  "Evaluate a region if it is active, otherwise evaluate symbol at point."
+  (interactive)
+  (if (use-region-p)
+      (gdb--eval-expression (buffer-substring-no-properties (region-beginning) (region-end)))
+    (gdb--eval-expression (thing-at-point 'symbol))))
+
 (defun gdb-eval-expression ()
   "Evaluate expression once and print result."
   (interactive)
+  (gdb--eval-expression (gdb--read-line "Expression to evaluate: ")))
+
+(defun gdb--eval-expression (expression)
+  "Evaluate given expression and print result."
   (gdb--with-valid-session
    (let* ((frame (or (gdb--session-selected-frame session) (user-error "No frame is selected")))
-          (expression (gdb--read-line "Expression to evaluate: "))
           result)
      (when expression
        (setq result (gdb--get-data (concat "-data-evaluate-expression " (gdb--escape-argument expression))
